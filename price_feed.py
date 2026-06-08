@@ -3,7 +3,6 @@ import threading
 import requests
 import logging
 from collections import deque
-from datetime import datetime, timezone
 import numpy as np
 from config import PRICE_INTERVAL
 
@@ -41,20 +40,29 @@ class PriceFeed:
             time.sleep(PRICE_INTERVAL)
 
     def _fetch(self):
+        # Kraken — no geo-restrictions, free, reliable
         r = requests.get(
-            "https://api.binance.com/api/v3/ticker/price",
-            params={"symbols": '["BTCUSDT","ETHUSDT"]'},
+            "https://api.kraken.com/0/public/Ticker",
+            params={"pair": "XBTUSD,ETHUSD"},
             timeout=10
         )
         r.raise_for_status()
-        data = {item["symbol"]: float(item["price"]) for item in r.json()}
+        data = r.json()
+        result = data.get("result", {})
+
+        btc_price = float(list(result.get("XXBTZUSD", {}).get("c", [0]))[0])
+        eth_price = float(list(result.get("XETHZUSD", {}).get("c", [0]))[0])
+
         now = time.time()
         with self._lock:
-            self.prices["bitcoin"].append(data["BTCUSDT"])
-            self.timestamps["bitcoin"].append(now)
-            self.prices["ethereum"].append(data["ETHUSDT"])
-            self.timestamps["ethereum"].append(now)
-        logger.debug(f"BTC={data['BTCUSDT']} ETH={data['ETHUSDT']}")
+            if btc_price > 0:
+                self.prices["bitcoin"].append(btc_price)
+                self.timestamps["bitcoin"].append(now)
+            if eth_price > 0:
+                self.prices["ethereum"].append(eth_price)
+                self.timestamps["ethereum"].append(now)
+
+        logger.debug(f"BTC={btc_price} ETH={eth_price}")
 
     def get_latest(self, asset):
         with self._lock:
