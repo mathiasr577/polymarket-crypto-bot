@@ -5,7 +5,7 @@ import logging
 from collections import deque
 from datetime import datetime, timezone
 import numpy as np
-from config import COINGECKO_URL, PRICE_INTERVAL
+from config import PRICE_INTERVAL
 
 logger = logging.getLogger(__name__)
 
@@ -42,19 +42,19 @@ class PriceFeed:
 
     def _fetch(self):
         r = requests.get(
-            COINGECKO_URL,
-            params={"ids": "bitcoin,ethereum", "vs_currencies": "usd"},
+            "https://api.binance.com/api/v3/ticker/price",
+            params={"symbols": '["BTCUSDT","ETHUSDT"]'},
             timeout=10
         )
         r.raise_for_status()
-        data = r.json()
+        data = {item["symbol"]: float(item["price"]) for item in r.json()}
         now = time.time()
         with self._lock:
-            for asset in ["bitcoin", "ethereum"]:
-                price = data[asset]["usd"]
-                self.prices[asset].append(price)
-                self.timestamps[asset].append(now)
-        logger.debug(f"BTC={data['bitcoin']['usd']} ETH={data['ethereum']['usd']}")
+            self.prices["bitcoin"].append(data["BTCUSDT"])
+            self.timestamps["bitcoin"].append(now)
+            self.prices["ethereum"].append(data["ETHUSDT"])
+            self.timestamps["ethereum"].append(now)
+        logger.debug(f"BTC={data['BTCUSDT']} ETH={data['ETHUSDT']}")
 
     def get_latest(self, asset):
         with self._lock:
@@ -75,17 +75,11 @@ class PriceFeed:
 
         arr = np.array(prices, dtype=float)
 
-        # RSI(14)
         rsi = self._rsi(arr, 14)
-
-        # EMA(9), EMA(21)
         ema9 = self._ema(arr, 9)
         ema21 = self._ema(arr, 21)
-
-        # Momentum: last 3 candles direction
         momentum = self._momentum(arr)
 
-        # Volatility: % change last 5 samples (~2.5 min)
         n_vol = min(10, len(arr))
         vol = abs(arr[-1] - arr[-n_vol]) / arr[-n_vol] if arr[-n_vol] != 0 else 0
 
@@ -122,14 +116,13 @@ class PriceFeed:
         return np.array(ema)
 
     def _momentum(self, arr, n=3):
-        """Returns 'up', 'down', or 'neutral' based on last n price changes."""
         if len(arr) < n + 1:
             return "neutral"
         changes = [arr[-(i)] - arr[-(i+1)] for i in range(1, n+1)]
         if all(c < 0 for c in changes):
-            return "down"   # 3 red candles
+            return "down"
         if all(c > 0 for c in changes):
-            return "up"     # 3 green candles
+            return "up"
         return "neutral"
 
 
