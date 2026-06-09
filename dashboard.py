@@ -10,7 +10,7 @@ HTML = """
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Polymarket Crypto Bot</title>
-<meta http-equiv="refresh" content="15">
+
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { background: #0d0f14; color: #e2e8f0; font-family: 'Segoe UI', monospace; padding: 20px; }
@@ -86,7 +86,7 @@ HTML = """
       <td><span class="badge {{ 'badge-green' if p.side == 'UP' else 'badge-red' }}">{{ p.side }}</span></td>
       <td>${{ "%.2f"|format(p.size) }}</td>
       <td><span class="badge {{ 'badge-yellow' if p.confidence == 'HIGH' else '' }}">{{ p.confidence }}</span></td>
-      <td>{{ p.opened_at[:19] if p.opened_at else '?' }}</td>
+      <td>{{ p.opened_at|string|truncate(19, True, '') if p.opened_at else '?' }}</td>
       <td style="font-size:0.7rem;color:#64748b;">{{ p.reasons[:80] if p.reasons else '' }}</td>
     </tr>
     {% endfor %}
@@ -146,14 +146,14 @@ HTML = """
       <td>{{ t.outcome or '?' }}</td>
       <td class="{{ 'green' if t.pnl and t.pnl > 0 else 'red' }}">${{ "%+.2f"|format(t.pnl or 0) }}</td>
       <td><span class="badge {{ 'badge-green' if t.win else 'badge-red' }}">{{ 'WIN' if t.win else 'LOSS' }}</span></td>
-      <td style="font-size:0.7rem;">{{ str(t.resolved_at)[:16] if t.resolved_at else '—' }}</td>
+      <td style="font-size:0.7rem;">{{ t.resolved_at|string|truncate(16, True, '') if t.resolved_at else '—' }}</td>
     </tr>
     {% endfor %}
   </table>
 </div>
 {% endif %}
 
-<div class="footer">Auto-refresh every 15s · {{ now }}</div>
+<div class="footer">{{ now }}</div>
 </body>
 </html>
 """

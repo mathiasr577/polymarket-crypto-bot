@@ -190,7 +190,7 @@ class MarketScanner:
         if end_dt is None:
             return None
         days_to_end = (end_dt - now).total_seconds() / 86400
-        if days_to_end < 0 or days_to_end > 30:
+        if days_to_end < 0 or days_to_end > 180:
             return None
 
         return {
