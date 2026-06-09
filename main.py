@@ -1,7 +1,3 @@
-"""
-Polymarket Crypto Bot — main orchestrator
-Paper trading mode by default.
-"""
 import logging
 import threading
 import time
@@ -21,24 +17,20 @@ from signal_engine import generate_signal, kelly_size
 from paper_trader import get_trader
 from dashboard import create_dashboard
 
-# ─────────────────────────── helpers ───────────────────────────
 
 def is_trading_hours() -> bool:
     h = datetime.now(timezone.utc).hour
     return config.TRADING_START_UTC <= h < config.TRADING_END_UTC
+
 
 def is_drawdown_ok(trader) -> bool:
     stats = trader.get_stats()
     drawdown = (stats["initial_balance"] - stats["balance"]) / stats["initial_balance"]
     return drawdown < config.DRAWDOWN_LIMIT
 
-# ────────────────── market outcome resolver ─────────────────────
 
-def resolve_markets(trader, scanner, feed):
-    """
-    For each open paper position, check if the market has resolved.
-    We query Gamma API for market status and determine winner.
-    """
+def resolve_markets(trader):
+    """Check open positions and resolve any that have closed."""
     open_positions = list(trader.open_positions.values())
     if not open_positions:
         return
@@ -54,27 +46,59 @@ def resolve_markets(trader, scanner, feed):
                 continue
             m = r.json()
 
-            # Check if closed/resolved
             closed = m.get("closed") or m.get("resolved") or False
             if not closed:
+                # Check if token price moved to take profit (>0.85)
+                _check_take_profit(trader, pos, m)
                 continue
 
-            # Determine winner from outcomes + resolutionId or tokens
             outcome = _determine_outcome(m)
             if outcome:
                 trader.resolve_trade(market_id, outcome)
 
         except Exception as e:
-            logger.error(f"Resolve check error for {market_id}: {e}")
+            logger.error(f"Resolve check error {market_id}: {e}")
+
+
+def _check_take_profit(trader, pos, m):
+    """
+    If the token we hold is now priced at 0.85+, treat as win and close.
+    This captures profit before market officially resolves.
+    """
+    try:
+        outcome_prices = m.get("outcomePrices")
+        if isinstance(outcome_prices, str):
+            import json
+            outcome_prices = json.loads(outcome_prices)
+        if not outcome_prices:
+            return
+
+        side = pos["side"]
+        outcomes = m.get("outcomes")
+        if isinstance(outcomes, str):
+            import json
+            outcomes = json.loads(outcomes)
+        if not outcomes:
+            return
+
+        for i, outcome in enumerate(outcomes):
+            if outcome.strip().upper() == side and i < len(outcome_prices):
+                price = float(outcome_prices[i])
+                if price >= 0.85:
+                    logger.info(f"Take profit: {side} token at {price:.2f}")
+                    trader.resolve_trade(pos["market_id"], side)
+                    return
+                elif price <= 0.15:
+                    # Stop loss — it's basically lost
+                    loser = "YES" if side == "NO" else "NO"
+                    trader.resolve_trade(pos["market_id"], loser)
+    except Exception as e:
+        logger.debug(f"Take profit check error: {e}")
 
 
 def _determine_outcome(m: dict) -> str | None:
-    """
-    Try to determine if UP or DOWN won from market data.
-    """
     import json
 
-    # Check resolutionId or winner
     outcomes = m.get("outcomes")
     if isinstance(outcomes, str):
         try:
@@ -82,40 +106,34 @@ def _determine_outcome(m: dict) -> str | None:
         except Exception:
             return None
 
-    # Some Gamma responses have resolvedOutcome
     resolved = m.get("resolvedOutcome") or m.get("resolved_outcome")
     if resolved is not None:
         idx = int(resolved)
         if outcomes and idx < len(outcomes):
-            val = outcomes[idx].strip().upper()
-            if "UP" in val:
-                return "UP"
-            elif "DOWN" in val:
-                return "DOWN"
+            return outcomes[idx].strip().upper()
 
-    # Fallback: check prices (the winner token → price=1.0)
-    tokens = m.get("tokens") or []
-    for tok in tokens:
-        outcome_name = (tok.get("outcome") or "").strip().upper()
-        price = float(tok.get("price") or 0)
-        if price >= 0.99:
-            if "UP" in outcome_name:
-                return "UP"
-            elif "DOWN" in outcome_name:
-                return "DOWN"
+    outcome_prices = m.get("outcomePrices")
+    if isinstance(outcome_prices, str):
+        try:
+            outcome_prices = json.loads(outcome_prices)
+        except Exception:
+            return None
+
+    if outcome_prices and outcomes:
+        for i, price in enumerate(outcome_prices):
+            if float(price) >= 0.99 and i < len(outcomes):
+                return outcomes[i].strip().upper()
 
     return None
 
-
-# ─────────────────────── trading loop ──────────────────────────
 
 def trading_loop():
     scanner = get_scanner()
     feed = get_feed()
     trader = get_trader()
 
-    logger.info("Trading loop started")
-    time.sleep(90)  # warm-up: let feed collect 3+ prices
+    logger.info("Trading loop started — warming up 90s...")
+    time.sleep(90)
 
     while True:
         try:
@@ -134,65 +152,57 @@ def _tick(scanner, feed, trader):
         logger.warning("Drawdown limit reached — paused")
         return
 
-    # Check for resolved markets
-    resolve_markets(trader, scanner, feed)
+    resolve_markets(trader)
 
-    # Get active markets
     markets = scanner.get_markets()
     if not markets:
-        logger.debug("No active markets found")
+        logger.debug("No crypto markets found yet")
         return
 
-    # Track which assets we've already traded this tick
-    traded_assets = set(p.get("asset") for p in trader.open_positions.values())
+    logger.debug(f"Evaluating {len(markets)} markets")
 
-    for market in markets:
-        asset = market["asset"]  # "bitcoin" or "ethereum"
+    # Track markets we already have positions in
+    open_market_ids = set(trader.open_positions.keys())
+
+    for market in markets[:20]:  # top 20 by volume
         market_id = market["id"]
 
-        # Skip if already in this market
-        if market_id in trader.open_positions:
+        if market_id in open_market_ids:
             continue
 
-        # Get indicators
+        # Max 1 position per asset at a time
+        asset = market["asset"]
+        asset_positions = [
+            p for p in trader.open_positions.values()
+            if p.get("asset") == asset
+        ]
+        if len(asset_positions) >= 2:
+            continue
+
         indicators = feed.get_indicators(asset)
         if indicators is None:
-            logger.debug(f"No indicators for {asset} yet")
             continue
 
-        # Generate signal
-        signal = generate_signal(indicators)
+        signal = generate_signal(indicators, market)
         if signal["blocked"]:
-            logger.debug(f"{asset}: blocked — {signal['block_reason']}")
+            logger.debug(f"Blocked: {signal['block_reason']}")
             continue
 
         side = signal["side"]
+        token_id = signal["token_id"]
+        entry_price = signal["entry_price"]
         confidence = signal["confidence"]
 
-        # Get token_id for the correct outcome
-        tokens = market["tokens"]
-        token_id = tokens.get(side)
-        if not token_id:
-            logger.warning(f"No token_id for {side} in market {market_id}")
-            continue
-
-        # Get current market price
-        price = _get_token_price(token_id)
-        if price is None:
-            price = 0.50  # fallback mid
-
-        # Kelly sizing
         win_rate = trader.get_win_rate(50)
         size = kelly_size(trader.balance, win_rate, confidence)
 
-        # Paper trade
         opened = trader.open_trade(
             market_id=market_id,
             title=market["title"],
             asset=asset,
             side=side,
             size=size,
-            price=price,
+            price=entry_price,
             confidence=confidence,
             reasons=signal["reasons"],
             indicators=indicators,
@@ -200,27 +210,10 @@ def _tick(scanner, feed, trader):
 
         if opened:
             logger.info(
-                f"✅ Trade: {side} {asset.upper()} ${size:.2f} "
-                f"[{confidence}] market={market['title'][:40]}"
+                f"✅ TRADE: {side} ${size:.2f} [{confidence}] "
+                f"'{market['title'][:50]}' @ {entry_price:.2f}"
             )
 
-
-def _get_token_price(token_id: str) -> float | None:
-    try:
-        r = requests.get(
-            f"{config.CLOB_HOST}/price",
-            params={"token_id": token_id, "side": "BUY"},
-            timeout=5
-        )
-        if r.status_code == 200:
-            data = r.json()
-            return float(data.get("price", 0.5))
-    except Exception:
-        pass
-    return None
-
-
-# ──────────────────────── price getter for dashboard ─────────────────────────
 
 def get_prices_snapshot():
     feed = get_feed()
@@ -230,23 +223,18 @@ def get_prices_snapshot():
     return result
 
 
-# ────────────────────────────── main ─────────────────────────────────────────
-
 def main():
     mode_label = "📄 PAPER TRADING" if config.PAPER_TRADING else "🔴 LIVE TRADING"
     logger.info(f"Starting bot — mode: {mode_label}")
 
-    # Start data services
     start_feed()
     start_scanner()
 
     trader = get_trader()
 
-    # Start trading loop in background thread
     t = threading.Thread(target=trading_loop, daemon=True)
     t.start()
 
-    # Flask dashboard
     flask_app = create_dashboard(
         get_stats_fn=trader.get_stats,
         get_prices_fn=get_prices_snapshot,
