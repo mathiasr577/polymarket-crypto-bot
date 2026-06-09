@@ -159,7 +159,7 @@ def _tick(scanner, feed, trader):
         logger.debug("No crypto markets found yet")
         return
 
-    logger.debug(f"Evaluating {len(markets)} markets")
+    logger.info(f"Evaluating {len(markets)} markets, balance={trader.balance:.2f}")
 
     # Track markets we already have positions in
     open_market_ids = set(trader.open_positions.keys())
@@ -185,7 +185,7 @@ def _tick(scanner, feed, trader):
 
         signal = generate_signal(indicators, market)
         if signal["blocked"]:
-            logger.debug(f"Blocked: {signal['block_reason']}")
+            logger.info(f"Blocked [{market['title'][:40]}]: {signal['block_reason']}")
             continue
 
         side = signal["side"]
