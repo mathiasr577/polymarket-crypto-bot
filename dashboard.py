@@ -179,4 +179,18 @@ def create_dashboard(get_stats_fn, get_prices_fn, mode="PAPER TRADING"):
     def health():
         return "OK"
 
+    @app.route("/api/reset-positions", methods=["POST"])
+    def reset_positions():
+        """Emergency: close all open positions as losses."""
+        from paper_trader import get_trader
+        trader = get_trader()
+        closed = []
+        for market_id in list(trader.open_positions.keys()):
+            pos = trader.open_positions[market_id]
+            side = pos["side"]
+            loser = "NO" if side == "YES" else "YES"
+            trader.resolve_trade(market_id, loser)
+            closed.append(market_id)
+        return jsonify({"reset": len(closed), "markets": closed})
+
     return app

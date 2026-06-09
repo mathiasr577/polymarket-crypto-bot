@@ -185,6 +185,14 @@ class MarketScanner:
 
         volume24hr = float(m.get("volume24hr") or 0)
 
+        # Filter: only markets resolving within 30 days
+        now = datetime.now(timezone.utc)
+        if end_dt is None:
+            return None
+        days_to_end = (end_dt - now).total_seconds() / 86400
+        if days_to_end < 0 or days_to_end > 30:
+            return None
+
         return {
             "id": m.get("id"),
             "title": title,
@@ -193,8 +201,9 @@ class MarketScanner:
             "yes_price": yes_price,
             "no_price": no_price,
             "end_dt": end_dt,
+            "days_to_end": round(days_to_end, 1),
             "price_target": price_target,
-            "direction": direction,  # "up" or "down"
+            "direction": direction,
             "volume24hr": volume24hr,
             "condition_id": m.get("conditionId") or m.get("condition_id"),
         }
