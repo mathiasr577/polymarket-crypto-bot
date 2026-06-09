@@ -1,7 +1,6 @@
 import json
 import logging
 import threading
-import time
 import psycopg2
 import psycopg2.extras
 from datetime import datetime, timezone
@@ -43,13 +42,22 @@ VALUES (1, %(bal)s, %(bal)s)
 ON CONFLICT (id) DO NOTHING;
 """
 
+def _safe_float(val):
+    """Convert numpy floats or None to plain Python float."""
+    if val is None:
+        return None
+    try:
+        return float(val)
+    except Exception:
+        return None
+
 class PaperTrader:
     def __init__(self):
         self.conn = None
         self._lock = threading.Lock()
         self.balance = PAPER_BALANCE
         self.initial_balance = PAPER_BALANCE
-        self.open_positions = {}  # market_id -> trade dict
+        self.open_positions = {}
         self._connect()
 
     def _connect(self):
@@ -77,7 +85,6 @@ class PaperTrader:
                 if row:
                     self.balance = row["balance"]
                     self.initial_balance = row["initial_balance"]
-
                 cur.execute("SELECT * FROM paper_trades WHERE resolved_at IS NULL")
                 rows = cur.fetchall()
                 for row in rows:
@@ -101,7 +108,6 @@ class PaperTrader:
                    confidence, reasons, indicators) -> bool:
         with self._lock:
             if market_id in self.open_positions:
-                logger.debug(f"Already in market {market_id}")
                 return False
             if len(self.open_positions) >= 5:
                 logger.debug("Max simultaneous positions reached")
@@ -122,9 +128,9 @@ class PaperTrader:
                 "price": price,
                 "confidence": confidence,
                 "reasons": json.dumps(reasons),
-                "signal_rsi": indicators.get("rsi"),
-                "signal_ema9": indicators.get("ema9"),
-                "signal_ema21": indicators.get("ema21"),
+                "signal_rsi": _safe_float(indicators.get("rsi")),
+                "signal_ema9": _safe_float(indicators.get("ema9")),
+                "signal_ema21": _safe_float(indicators.get("ema21")),
                 "momentum": indicators.get("momentum"),
                 "opened_at": datetime.now(timezone.utc).isoformat(),
             }
@@ -140,10 +146,15 @@ class PaperTrader:
                              reasons, signal_rsi, signal_ema9, signal_ema21, momentum)
                             VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                             RETURNING id
-                        """, (market_id, title, asset, side, size, price, confidence,
-                              json.dumps(reasons), indicators.get("rsi"),
-                              indicators.get("ema9"), indicators.get("ema21"),
-                              indicators.get("momentum")))
+                        """, (
+                            market_id, title, asset, side,
+                            _safe_float(size), _safe_float(price),
+                            confidence, json.dumps(reasons),
+                            _safe_float(indicators.get("rsi")),
+                            _safe_float(indicators.get("ema9")),
+                            _safe_float(indicators.get("ema21")),
+                            indicators.get("momentum")
+                        ))
                         row = cur.fetchone()
                         trade["db_id"] = row[0] if row else None
                 except Exception as e:
@@ -153,9 +164,6 @@ class PaperTrader:
             return True
 
     def resolve_trade(self, market_id: str, outcome: str):
-        """
-        outcome: "UP" or "DOWN" (actual winner)
-        """
         with self._lock:
             trade = self.open_positions.pop(market_id, None)
             if not trade:
@@ -164,9 +172,8 @@ class PaperTrader:
             side = trade["side"]
             size = trade["size"]
             win = (side == outcome)
-            pnl = size if win else -size  # binary: win = 2x, net pnl = +size
-            self.balance += size + pnl  # get back cost + profit if win
-
+            pnl = size if win else -size
+            self.balance += size + pnl
             self._save_balance()
 
             if self.conn:
@@ -194,14 +201,21 @@ class PaperTrader:
                 "roi": (self.balance - self.initial_balance) / self.initial_balance * 100,
                 "open_count": len(self.open_positions),
                 "open_positions": list(self.open_positions.values()),
+                "total_trades": 0,
+                "wins": 0,
+                "win_rate": 0,
+                "total_pnl": 0,
+                "best_trade": 0,
+                "worst_trade": 0,
+                "by_asset": {},
+                "recent_trades": [],
             }
 
         if self.conn:
             try:
                 with self.conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                     cur.execute("""
-                        SELECT
-                            COUNT(*) as total,
+                        SELECT COUNT(*) as total,
                             COUNT(*) FILTER (WHERE win) as wins,
                             SUM(pnl) as total_pnl,
                             MAX(pnl) as best_trade,
@@ -216,17 +230,14 @@ class PaperTrader:
                     stats["best_trade"] = float(row["best_trade"] or 0)
                     stats["worst_trade"] = float(row["worst_trade"] or 0)
 
-                    # By asset
                     cur.execute("""
-                        SELECT asset,
-                            COUNT(*) as total,
+                        SELECT asset, COUNT(*) as total,
                             COUNT(*) FILTER (WHERE win) as wins
                         FROM paper_trades WHERE resolved_at IS NOT NULL
                         GROUP BY asset
                     """)
                     stats["by_asset"] = {r["asset"]: dict(r) for r in cur.fetchall()}
 
-                    # Recent trades
                     cur.execute("""
                         SELECT * FROM paper_trades
                         WHERE resolved_at IS NOT NULL

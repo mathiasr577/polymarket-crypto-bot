@@ -224,17 +224,17 @@ class MarketScanner:
     def _extract_direction(self, title_lower: str) -> str:
         """
         Returns 'up' if YES means price goes UP (above/over/hit/reach)
-        Returns 'down' if YES means price goes DOWN (below/under)
+        Returns 'down' if YES means price goes DOWN (below/under/dip/drop)
         """
-        up_words = ["above", "over", "hit", "reach", "exceed", "higher", "at least"]
-        down_words = ["below", "under", "lower", "drop", "fall"]
+        down_words = ["below", "under", "lower", "drop", "fall", "dip", "crash", "decline"]
+        up_words = ["above", "over", "hit", "reach", "exceed", "higher", "at least", "surpass"]
 
-        for w in up_words:
-            if w in title_lower:
-                return "up"
         for w in down_words:
             if w in title_lower:
                 return "down"
+        for w in up_words:
+            if w in title_lower:
+                return "up"
         return "up"  # default
 
     def _parse_dt(self, s: str):
