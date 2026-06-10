@@ -41,9 +41,9 @@ class MarketScanner:
         now_ts = int(time.time())
         found = []
 
-        # Current and next 2 windows
+        # Previous, current and next 2 windows
         current = (now_ts // 300) * 300
-        windows = [current, current + 300, current + 600]
+        windows = [current - 300, current, current + 300, current + 600]
 
         for prefix, asset in ASSETS.items():
             for ts in windows:
@@ -121,7 +121,7 @@ class MarketScanner:
                 event.get("endDate") or ""
             )
             now = datetime.now(timezone.utc)
-            if not end_dt or end_dt < now:
+            if not end_dt or end_dt < (now - __import__('datetime').timedelta(seconds=30)):
                 return None
 
             seconds_left = (end_dt - now).total_seconds()
