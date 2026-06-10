@@ -58,6 +58,8 @@ class MarketScanner:
         if found:
             logger.info(f"MarketScanner: {len(found)} 5min markets | " +
                        " | ".join(f"{m['asset'].upper()} {m['seconds_left']:.0f}s" for m in found))
+        else:
+            logger.info("MarketScanner: 0 markets found — checking slugs...")
 
     def _fetch(self, slug: str, asset: str) -> dict | None:
         try:

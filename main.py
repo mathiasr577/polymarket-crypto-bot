@@ -120,7 +120,7 @@ def _tick(scanner, feed, trader):
 
     markets = scanner.get_markets()
     if not markets:
-        logger.debug("No 5min markets found")
+        logger.info("No 5min markets found — scanner still searching")
         return
 
     logger.info(f"Evaluating {len(markets)} markets | balance=${trader.balance:.2f}")
@@ -143,7 +143,7 @@ def _tick(scanner, feed, trader):
 
         indicators = feed.get_indicators(asset)
         if indicators is None:
-            logger.debug(f"No indicators for {asset} yet")
+            logger.info(f"No indicators for {asset} yet")
             continue
 
         signal = generate_signal(indicators, market)
