@@ -29,6 +29,19 @@ def generate_signal(indicators: dict, market: dict) -> dict:
         result["block_reason"] = "Warming up"
         return result
 
+    # Need at least 10 price samples before trading
+    if indicators.get("price_count", 0) < 10:
+        result["blocked"] = True
+        result["block_reason"] = f"Not enough data: {indicators.get('price_count', 0)} samples"
+        return result
+
+    # Need order flow data
+    buy_ratio = indicators.get("buy_ratio", 0.5)
+    if buy_ratio == 0.5 and indicators.get("price_count", 0) < 15:
+        result["blocked"] = True
+        result["block_reason"] = "Waiting for order flow data"
+        return result
+
     seconds_left = market.get("seconds_left", 300)
     if seconds_left < 60:
         result["blocked"] = True
