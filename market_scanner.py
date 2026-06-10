@@ -73,12 +73,15 @@ class MarketScanner:
 
             data = r.json()
             if not data:
+                logger.info(f"Empty response for {slug}")
                 return None
 
             event = data[0] if isinstance(data, list) else data
             markets = event.get("markets", [])
             if not markets:
+                logger.info(f"No markets in event for {slug}")
                 return None
+            logger.info(f"Found event {slug}: {len(markets)} markets, active={event.get('active')}, closed={event.get('closed')}")
 
             m = markets[0]
 
