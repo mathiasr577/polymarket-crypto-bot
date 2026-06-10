@@ -202,6 +202,7 @@ def main():
     flask_app = create_dashboard(
         get_stats_fn=trader.get_stats,
         get_prices_fn=get_prices_snapshot,
+        get_markets_fn=get_scanner().get_markets,
         mode=mode_label,
     )
 
