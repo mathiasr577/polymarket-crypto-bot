@@ -3,12 +3,11 @@ import logging
 import time
 import json
 import threading
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from config import GAMMA_API, SCAN_INTERVAL
 
 logger = logging.getLogger(__name__)
 
-# Assets to trade and their slug prefixes
 ASSETS = {
     "btc": "bitcoin",
     "eth": "ethereum",
@@ -42,14 +41,14 @@ class MarketScanner:
         now_ts = int(time.time())
         found = []
 
-        # Generate next 3 upcoming 5-minute windows
-        current_window = (now_ts // 300) * 300
-        windows = [current_window, current_window + 300, current_window + 600]
+        # Current and next 2 windows
+        current = (now_ts // 300) * 300
+        windows = [current, current + 300, current + 600]
 
-        for asset_prefix, asset_name in ASSETS.items():
-            for window_ts in windows:
-                slug = f"{asset_prefix}-updown-5m-{window_ts}"
-                market = self._fetch_event(slug, asset_name)
+        for prefix, asset in ASSETS.items():
+            for ts in windows:
+                slug = f"{prefix}-updown-5m-{ts}"
+                market = self._fetch(slug, asset)
                 if market:
                     found.append(market)
 
@@ -57,11 +56,10 @@ class MarketScanner:
             self.active_markets = found
 
         if found:
-            logger.info(f"MarketScanner: {len(found)} 5min markets found")
-        else:
-            logger.debug("No 5min markets found yet")
+            logger.info(f"MarketScanner: {len(found)} 5min markets | " +
+                       " | ".join(f"{m['asset'].upper()} {m['seconds_left']:.0f}s" for m in found))
 
-    def _fetch_event(self, slug: str, asset: str) -> dict | None:
+    def _fetch(self, slug: str, asset: str) -> dict | None:
         try:
             r = requests.get(
                 f"{GAMMA_API}/events",
@@ -80,91 +78,102 @@ class MarketScanner:
             if not markets:
                 return None
 
-            # Get the main market (usually first one)
             m = markets[0]
 
-            # Parse outcomes and token IDs
-            outcomes = m.get("outcomes")
-            if isinstance(outcomes, str):
-                try:
-                    outcomes = json.loads(outcomes)
-                except Exception:
-                    return None
+            if m.get("closed"):
+                return None
 
-            token_ids = m.get("clobTokenIds") or m.get("clob_token_ids")
-            if isinstance(token_ids, str):
-                try:
-                    token_ids = json.loads(token_ids)
-                except Exception:
-                    return None
+            # Outcomes and tokens
+            outcomes = self._parse_json(m.get("outcomes"))
+            token_ids = self._parse_json(m.get("clobTokenIds") or m.get("clob_token_ids"))
 
             if not outcomes or not token_ids or len(outcomes) < 2:
                 return None
 
-            # Map Up/Down to token IDs
             tokens = {}
-            for i, outcome in enumerate(outcomes):
-                key = outcome.strip().upper()
+            for i, o in enumerate(outcomes):
+                k = o.strip().upper()
                 if i < len(token_ids):
-                    tokens[key] = str(token_ids[i])
+                    tokens[k] = str(token_ids[i])
 
             if "UP" not in tokens or "DOWN" not in tokens:
                 return None
 
-            # Parse prices
-            outcome_prices = m.get("outcomePrices")
-            if isinstance(outcome_prices, str):
-                try:
-                    outcome_prices = json.loads(outcome_prices)
-                except Exception:
-                    outcome_prices = None
-
+            # Prices
+            prices = self._parse_json(m.get("outcomePrices")) or ["0.5", "0.5"]
             up_price = 0.5
             down_price = 0.5
-            if outcome_prices and len(outcome_prices) >= 2:
-                try:
-                    # Find which index is UP
-                    for i, o in enumerate(outcomes):
-                        if o.strip().upper() == "UP":
-                            up_price = float(outcome_prices[i])
-                        elif o.strip().upper() == "DOWN":
-                            down_price = float(outcome_prices[i])
-                except Exception:
-                    pass
+            for i, o in enumerate(outcomes):
+                k = o.strip().upper()
+                if k == "UP" and i < len(prices):
+                    up_price = float(prices[i])
+                elif k == "DOWN" and i < len(prices):
+                    down_price = float(prices[i])
 
-            # Parse end time
+            # End time
             end_dt = self._parse_dt(
                 m.get("endDateIso") or m.get("endDate") or
                 event.get("endDate") or ""
             )
-
-            # Skip if already resolved or not active
-            if m.get("closed") or not m.get("active", True):
-                return None
-
-            # Skip if end time is in the past
             now = datetime.now(timezone.utc)
-            if end_dt and end_dt < now:
+            if not end_dt or end_dt < now:
                 return None
 
-            # Time remaining
-            seconds_left = (end_dt - now).total_seconds() if end_dt else 300
+            seconds_left = (end_dt - now).total_seconds()
+
+            # Reference price from market description/title
+            # Polymarket stores it as "Price To Beat" — we get it from the event
+            ref_price = self._extract_ref_price(event, m)
 
             return {
-                "id": m.get("id"),
+                "id": str(m.get("id", "")),
                 "slug": slug,
-                "title": event.get("title") or m.get("question") or slug,
+                "title": event.get("title") or slug,
                 "asset": asset,
                 "tokens": tokens,
                 "up_price": up_price,
                 "down_price": down_price,
+                "ref_price": ref_price,
                 "end_dt": end_dt,
                 "seconds_left": seconds_left,
-                "condition_id": m.get("conditionId"),
             }
 
         except Exception as e:
             logger.debug(f"Fetch {slug}: {e}")
+            return None
+
+    def _extract_ref_price(self, event: dict, market: dict) -> float | None:
+        """
+        Try to extract the reference price (Price To Beat) from market data.
+        Polymarket stores this in the description or as startPrice.
+        """
+        try:
+            # Try startPrice field
+            sp = market.get("startPrice") or event.get("startPrice")
+            if sp:
+                return float(sp)
+
+            # Try parsing from description
+            desc = market.get("question") or event.get("title") or ""
+            import re
+            # Look for patterns like "$61,451.30" or "61451.30"
+            matches = re.findall(r'\$?([\d,]+\.?\d*)', desc)
+            for m in matches:
+                val = float(m.replace(",", ""))
+                if 1000 < val < 500000:  # reasonable BTC/ETH price
+                    return val
+        except Exception:
+            pass
+        return None
+
+    def _parse_json(self, val):
+        if val is None:
+            return None
+        if isinstance(val, (list, dict)):
+            return val
+        try:
+            return json.loads(val)
+        except Exception:
             return None
 
     def _parse_dt(self, s: str):
