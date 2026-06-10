@@ -116,12 +116,16 @@ class MarketScanner:
                     down_price = float(prices[i])
 
             # End time
-            end_dt = self._parse_dt(
-                m.get("endDateIso") or m.get("endDate") or
-                event.get("endDate") or ""
-            )
+            # Try market endDate first, then event endDate
+            end_str = m.get("endDate") or m.get("endDateIso") or event.get("endDate") or ""
+            end_dt = self._parse_dt(end_str)
             now = datetime.now(timezone.utc)
-            if not end_dt or end_dt < (now - __import__('datetime').timedelta(seconds=30)):
+            if not end_dt:
+                logger.info(f"No end_dt for {slug}")
+                return None
+            seconds_remaining = (end_dt - now).total_seconds()
+            if seconds_remaining < -30:
+                logger.info(f"Expired {slug}: end_dt={end_dt}, now={now}, diff={seconds_remaining:.0f}s")
                 return None
 
             seconds_left = (end_dt - now).total_seconds()
