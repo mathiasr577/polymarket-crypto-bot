@@ -2,6 +2,7 @@ import logging
 import threading
 import time
 import requests
+import json
 from datetime import datetime, timezone
 
 logging.basicConfig(
@@ -25,41 +26,27 @@ def is_drawdown_ok(trader) -> bool:
 
 
 def resolve_expired(trader):
-    """Auto-resolve positions where market has expired."""
     open_positions = list(trader.open_positions.values())
     if not open_positions:
         return
-
-    now = datetime.now(timezone.utc)
     for pos in open_positions:
         market_id = pos["market_id"]
         try:
-            r = requests.get(
-                f"{config.GAMMA_API}/markets/{market_id}",
-                timeout=8
-            )
+            r = requests.get(f"{config.GAMMA_API}/markets/{market_id}", timeout=8)
             if r.status_code != 200:
                 continue
-
             m = r.json()
-            closed = m.get("closed") or m.get("resolved") or False
-
-            if not closed:
+            if not (m.get("closed") or m.get("resolved")):
                 continue
-
-            # Determine winner
             outcome = _determine_outcome(m)
             if outcome:
                 trader.resolve_trade(market_id, outcome)
                 logger.info(f"Resolved {market_id}: {outcome}")
-
         except Exception as e:
-            logger.debug(f"Resolve check error {market_id}: {e}")
+            logger.debug(f"Resolve error {market_id}: {e}")
 
 
 def _determine_outcome(m: dict) -> str | None:
-    import json
-
     outcomes = m.get("outcomes")
     if isinstance(outcomes, str):
         try:
@@ -90,7 +77,6 @@ def _determine_outcome(m: dict) -> str | None:
                     return outcomes[i].strip().upper()
             except Exception:
                 pass
-
     return None
 
 
@@ -99,15 +85,15 @@ def trading_loop():
     feed = get_feed()
     trader = get_trader()
 
-    logger.info("Trading loop started — warming up 90s...")
-    time.sleep(90)
+    logger.info("Trading loop started — warming up 60s...")
+    time.sleep(60)
 
     while True:
         try:
             _tick(scanner, feed, trader)
         except Exception as e:
             logger.error(f"Tick error: {e}")
-        time.sleep(15)  # Check every 15s for 5min markets
+        time.sleep(10)  # Check every 10s — need fast response for T-10s entry
 
 
 def _tick(scanner, feed, trader):
@@ -115,28 +101,28 @@ def _tick(scanner, feed, trader):
         logger.warning("Drawdown limit reached — paused")
         return
 
-    # Resolve expired positions
     resolve_expired(trader)
 
     markets = scanner.get_markets()
     if not markets:
-        logger.info("No 5min markets found — scanner still searching")
         return
-
-    logger.info(f"Evaluating {len(markets)} markets | balance=${trader.balance:.2f}")
 
     open_market_ids = set(trader.open_positions.keys())
 
     for market in markets:
         market_id = market["id"]
-        if not market_id:
+        if not market_id or market_id in open_market_ids:
             continue
 
-        if market_id in open_market_ids:
+        seconds_left = market.get("seconds_left", 300)
+
+        # Only evaluate markets in entry window (T-10s to T-60s)
+        if seconds_left > 65 or seconds_left < 8:
             continue
+
+        asset = market["asset"]
 
         # Max 1 position per asset
-        asset = market["asset"]
         asset_open = [p for p in trader.open_positions.values() if p.get("asset") == asset]
         if asset_open:
             continue
@@ -146,14 +132,22 @@ def _tick(scanner, feed, trader):
             logger.info(f"No indicators for {asset} yet")
             continue
 
+        # Get ref_price from price feed (most accurate - captured at window open)
+        ref_from_feed = feed.get_current_window_ref(asset)
+        if ref_from_feed:
+            market["ref_price"] = ref_from_feed
+
+        if not market.get("ref_price"):
+            logger.info(f"No ref_price for {asset} market — skipping")
+            continue
+
         signal = generate_signal(indicators, market)
 
         if signal["blocked"]:
-            logger.info(f"Blocked [{market['title'][:40]}]: {signal['block_reason']}")
+            logger.info(f"Blocked [{asset.upper()} T-{seconds_left:.0f}s]: {signal['block_reason']}")
             continue
 
         side = signal["side"]
-        token_id = signal["token_id"]
         entry_price = signal["entry_price"]
         confidence = signal["confidence"]
 
@@ -175,7 +169,8 @@ def _tick(scanner, feed, trader):
         if opened:
             logger.info(
                 f"✅ TRADE: {side} {asset.upper()} ${size:.2f} "
-                f"[{confidence}] @ {entry_price:.2f} | {signal['reasons']}"
+                f"[{confidence}] @ {entry_price:.2f} | T-{seconds_left:.0f}s | "
+                f"{signal['reasons']}"
             )
 
 

@@ -3,7 +3,7 @@ import logging
 import time
 import json
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from config import GAMMA_API, SCAN_INTERVAL
 
 logger = logging.getLogger(__name__)
@@ -39,12 +39,11 @@ class MarketScanner:
 
     def _scan(self):
         now_ts = int(time.time())
-        found = []
-
-        # Previous, current and next 2 windows
         current = (now_ts // 300) * 300
+        # Previous window (might still be in last 60s), current, next 2
         windows = [current - 300, current, current + 300, current + 600]
 
+        found = []
         for prefix, asset in ASSETS.items():
             for ts in windows:
                 slug = f"{prefix}-updown-5m-{ts}"
@@ -56,10 +55,12 @@ class MarketScanner:
             self.active_markets = found
 
         if found:
-            logger.info(f"MarketScanner: {len(found)} 5min markets | " +
-                       " | ".join(f"{m['asset'].upper()} {m['seconds_left']:.0f}s" for m in found))
-        else:
-            logger.info("MarketScanner: 0 markets found — checking slugs...")
+            logger.info(
+                f"MarketScanner: {len(found)} markets | " +
+                " | ".join(f"{m['asset'].upper()} T-{m['seconds_left']:.0f}s ref=${m['ref_price']:,.0f}" 
+                          if m.get('ref_price') else f"{m['asset'].upper()} T-{m['seconds_left']:.0f}s"
+                          for m in found)
+            )
 
     def _fetch(self, slug: str, asset: str) -> dict | None:
         try:
@@ -73,22 +74,18 @@ class MarketScanner:
 
             data = r.json()
             if not data:
-                logger.info(f"Empty response for {slug}")
                 return None
 
             event = data[0] if isinstance(data, list) else data
             markets = event.get("markets", [])
             if not markets:
-                logger.info(f"No markets in event for {slug}")
                 return None
-            logger.info(f"Found event {slug}: {len(markets)} markets, active={event.get('active')}, closed={event.get('closed')}")
 
             m = markets[0]
 
             if m.get("closed"):
                 return None
 
-            # Outcomes and tokens
             outcomes = self._parse_json(m.get("outcomes"))
             token_ids = self._parse_json(m.get("clobTokenIds") or m.get("clob_token_ids"))
 
@@ -104,7 +101,6 @@ class MarketScanner:
             if "UP" not in tokens or "DOWN" not in tokens:
                 return None
 
-            # Prices
             prices = self._parse_json(m.get("outcomePrices")) or ["0.5", "0.5"]
             up_price = 0.5
             down_price = 0.5
@@ -115,24 +111,24 @@ class MarketScanner:
                 elif k == "DOWN" and i < len(prices):
                     down_price = float(prices[i])
 
-            # End time
-            # Try market endDate first, then event endDate
-            end_str = m.get("endDate") or m.get("endDateIso") or event.get("endDate") or ""
-            end_dt = self._parse_dt(end_str)
+            end_dt = self._parse_dt(
+                m.get("endDate") or m.get("endDateIso") or event.get("endDate") or ""
+            )
             now = datetime.now(timezone.utc)
             if not end_dt:
-                logger.info(f"No end_dt for {slug}")
-                return None
-            seconds_remaining = (end_dt - now).total_seconds()
-            if seconds_remaining < -30:
-                logger.info(f"Expired {slug}: end_dt={end_dt}, now={now}, diff={seconds_remaining:.0f}s")
                 return None
 
             seconds_left = (end_dt - now).total_seconds()
 
-            # Reference price from market description/title
-            # Polymarket stores it as "Price To Beat" — we get it from the event
-            ref_price = self._extract_ref_price(event, m)
+            # Skip if expired more than 30s ago
+            if seconds_left < -30:
+                return None
+
+            # Get reference price (Price To Beat = BTC price at market open)
+            # This comes from the startTime + Chainlink price
+            # We get it from the event's startTime field
+            start_time = event.get("startTime") or m.get("eventStartTime")
+            ref_price = self._get_ref_price(m, event, asset)
 
             return {
                 "id": str(m.get("id", "")),
@@ -151,28 +147,39 @@ class MarketScanner:
             logger.debug(f"Fetch {slug}: {e}")
             return None
 
-    def _extract_ref_price(self, event: dict, market: dict) -> float | None:
+    def _get_ref_price(self, market: dict, event: dict, asset: str) -> float | None:
         """
-        Try to extract the reference price (Price To Beat) from market data.
-        Polymarket stores this in the description or as startPrice.
+        Get the reference price (Price To Beat) for this market window.
+        Polymarket stores this as the Chainlink price at market open.
+        We fetch it from the Chainlink data stream or derive from market data.
         """
+        # Try to get from market description or title
+        import re
+        title = event.get("title") or market.get("question") or ""
+        
+        # Try Chainlink stream for BTC
         try:
-            # Try startPrice field
-            sp = market.get("startPrice") or event.get("startPrice")
-            if sp:
-                return float(sp)
-
-            # Try parsing from description
-            desc = market.get("question") or event.get("title") or ""
-            import re
-            # Look for patterns like "$61,451.30" or "61451.30"
-            matches = re.findall(r'\$?([\d,]+\.?\d*)', desc)
-            for m in matches:
-                val = float(m.replace(",", ""))
-                if 1000 < val < 500000:  # reasonable BTC/ETH price
-                    return val
+            if asset == "bitcoin":
+                url = "https://min-api.cryptocompare.com/data/price"
+                # Use market start time to get historical price - 
+                # for now use current as approximation
+                # Real implementation would cache the price at window open
+                pass
         except Exception:
             pass
+
+        # Parse from description if available
+        desc = market.get("description") or ""
+        patterns = [r'\$([0-9,]+\.?[0-9]*)', r'([0-9,]+\.?[0-9]*)\s*USD']
+        for pat in patterns:
+            matches = re.findall(pat, desc)
+            for match in matches:
+                val = float(match.replace(",", ""))
+                if asset == "bitcoin" and 10000 < val < 500000:
+                    return val
+                elif asset == "ethereum" and 100 < val < 50000:
+                    return val
+
         return None
 
     def _parse_json(self, val):
