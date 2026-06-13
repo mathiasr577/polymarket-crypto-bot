@@ -150,14 +150,18 @@ def generate_signal(indicators: dict, market: dict) -> dict:
 def kelly_size(balance: float, win_rate: float, confidence: str) -> float:
     from config import MAX_POSITION_PCT, MAX_POSITION_PCT_KELLY, MIN_TRADE_USD
 
-    # Con señal HIGH (delta fuerte) apostar más
+    # Sanity check balance
+    if balance <= 0 or balance > 100000:
+        return MIN_TRADE_USD
+
     if win_rate < 0.52:
-        win_rate = 0.55  # Asumimos ventaja basada en el build guide
+        win_rate = 0.55
     kelly_f = win_rate - (1 - win_rate)
     kelly_f = max(0.02, min(kelly_f, 0.5))
 
-    multiplier = 2.0 if confidence == "HIGH" else 1.0
+    multiplier = 1.5 if confidence == "HIGH" else 1.0
     size = balance * MAX_POSITION_PCT * kelly_f * multiplier
     size = min(size, balance * MAX_POSITION_PCT_KELLY)
+    size = min(size, 25.0)  # Hard cap: max 5 per trade
     size = max(size, MIN_TRADE_USD)
     return round(size, 2)

@@ -96,11 +96,7 @@ HTML = """
       <td class="{{ 'green' if ind.pct_2min > 0 else 'red' }}">
         {{ "%+.3f"|format(ind.pct_2min * 100) }}%
       </td>
-      <td>
-        <span style="color:{{ '#4ade80' if ind.buy_ratio > 0.55 else '#f87171' if ind.buy_ratio < 0.45 else '#94a3b8' }}">
-          {{ "%.0f"|format(ind.buy_ratio * 100) }}% buy
-        </span>
-      </td>
+      <td style="color:#64748b">—</td>
       <td class="{{ 'green' if ind.momentum == 'up' else 'red' if ind.momentum == 'down' else 'gray' }}">
         {{ ind.momentum }}
       </td>
