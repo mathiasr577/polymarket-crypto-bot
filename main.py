@@ -188,7 +188,7 @@ def _tick(scanner, feed, paper, live):
                     indicators=indicators,
                 )
 
-        # Live trade (limited to 4)
+        # Live trade (unlimited)
         if live and market_id not in live_open and live.can_trade():
             live_asset_open = [p for p in live.open_positions.values() if p.get("asset") == asset]
             if not live_asset_open:
@@ -222,7 +222,7 @@ def get_combined_stats():
 
 
 def main():
-    mode_label = "🔴 LIVE TEST (4 trades)" if not config.PAPER_TRADING else "📄 PAPER TRADING"
+    mode_label = "🔴 LIVE TRADING" if not config.PAPER_TRADING else "📄 PAPER TRADING"
     logger.info(f"Starting — mode: {mode_label}")
 
     if not config.PAPER_TRADING:
