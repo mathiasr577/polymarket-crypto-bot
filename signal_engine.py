@@ -105,17 +105,26 @@ def generate_signal(indicators: dict, market: dict) -> dict:
     up_price = market.get("up_price", 0.5)
     down_price = market.get("down_price", 0.5)
 
-    # Si el delta es fuerte, el token ya está caro pero todavía vale
-    # No apostar si el token ya vale más de 0.90 (poco upside)
+    # Filtro de precio: entre 0.25 y 0.80 solamente
+    # < 0.25 = sin liquidez, orden nunca se llena
+    # > 0.80 = poco upside
     if votes["UP"] >= votes["DOWN"]:
-        if up_price > 0.90:
+        if up_price > 0.80:
             result["blocked"] = True
-            result["block_reason"] = f"UP token too expensive: {up_price:.2f} (market already priced in)"
+            result["block_reason"] = f"UP token too expensive: {up_price:.2f}"
+            return result
+        if up_price < 0.25:
+            result["blocked"] = True
+            result["block_reason"] = f"UP token no liquidity: {up_price:.2f}"
             return result
     else:
-        if down_price > 0.90:
+        if down_price > 0.80:
             result["blocked"] = True
-            result["block_reason"] = f"DOWN token too expensive: {down_price:.2f} (market already priced in)"
+            result["block_reason"] = f"DOWN token too expensive: {down_price:.2f}"
+            return result
+        if down_price < 0.25:
+            result["blocked"] = True
+            result["block_reason"] = f"DOWN token no liquidity: {down_price:.2f}"
             return result
 
     # ── Evaluar ───────────────────────────────────────────────────────
