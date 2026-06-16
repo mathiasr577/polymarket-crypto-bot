@@ -19,6 +19,7 @@ class LiveTrader:
         self.total_trades = 0
         self.open_positions = {}
         self.results = []
+        self.attempted_markets = set()  # markets we already tried this session
         self._client = None
         self._init_client()
 
@@ -57,6 +58,8 @@ class LiveTrader:
                 return False
             if market_id in self.open_positions:
                 return False
+            if market_id in self.attempted_markets:
+                return False  # Already tried this market
             if len(self.open_positions) >= 2:
                 return False
 
