@@ -1,17 +1,14 @@
 """
 Live trader — ejecuta órdenes reales en Polymarket.
-Limitado a MAX_LIVE_TRADES trades para el test inicial.
 """
 import logging
-import json
 import threading
 from datetime import datetime, timezone
-from config import DATABASE_URL
 
 logger = logging.getLogger(__name__)
 
-MAX_LIVE_TRADES = 4  # Solo 4 trades de prueba
-TRADE_SIZE = 5.0     # $5 por trade
+MAX_LIVE_TRADES = 999
+TRADE_SIZE = 10.0
 
 class LiveTrader:
     def __init__(self):
@@ -19,7 +16,7 @@ class LiveTrader:
         self.total_trades = 0
         self.open_positions = {}
         self.results = []
-        self.attempted_markets = set()  # markets we already tried this session
+        self.attempted_markets = set()
         self._client = None
         self._init_client()
 
@@ -54,16 +51,14 @@ class LiveTrader:
                    reasons, indicators) -> bool:
         with self._lock:
             if self.total_trades >= MAX_LIVE_TRADES:
-                logger.info(f"Live test complete — {MAX_LIVE_TRADES} trades done")
                 return False
             if market_id in self.open_positions:
                 return False
             if market_id in self.attempted_markets:
-                return False  # Already tried this market
+                return False
             if len(self.open_positions) >= 2:
                 return False
 
-        # Place real order
         try:
             import time
             t0 = time.time()
@@ -80,6 +75,23 @@ class LiveTrader:
 
             if "error" in resp:
                 logger.error(f"Order failed: {resp['error']}")
+                return False
+
+            # Mark as attempted
+            with self._lock:
+                self.attempted_markets.add(market_id)
+
+            # If order not matched = no liquidity, cancel it
+            status = resp.get("status", "")
+            if status == "live":
+                logger.warning(f"Order not filled (no liquidity) — cancelling")
+                try:
+                    order_id = resp.get("orderID", "")
+                    if order_id and self._client:
+                        self._client.cancel(order_id)
+                        logger.info(f"Order cancelled")
+                except Exception as ce:
+                    logger.debug(f"Cancel error: {ce}")
                 return False
 
             with self._lock:
@@ -100,8 +112,8 @@ class LiveTrader:
                 self.open_positions[market_id] = trade
 
             logger.info(
-                f"🔴 LIVE TRADE #{self.total_trades}/{MAX_LIVE_TRADES}: "
-                f"{side} {asset.upper()} $5 @ {price:.2f} | "
+                f"LIVE TRADE #{self.total_trades}/{MAX_LIVE_TRADES}: "
+                f"{side} {asset.upper()} ${TRADE_SIZE} @ {price:.2f} | "
                 f"latency={latency*1000:.0f}ms | {reasons}"
             )
             return True
@@ -118,7 +130,6 @@ class LiveTrader:
 
             side = trade["side"]
             win = (side == outcome)
-            # Real PnL: if win, we get back 1.00 per token minus fee
             entry_price = trade["price"]
             if win:
                 pnl = TRADE_SIZE * ((1.0 - entry_price) / entry_price) * (1 - 0.07)
@@ -129,7 +140,7 @@ class LiveTrader:
             self.results.append(result)
 
             logger.info(
-                f"🔴 LIVE RESULT: {'WIN ✅' if win else 'LOSS ❌'} "
+                f"LIVE RESULT: {'WIN' if win else 'LOSS'} "
                 f"{side} {trade['asset'].upper()} | "
                 f"PnL={pnl:+.2f} | entry={entry_price:.2f}"
             )
@@ -137,13 +148,12 @@ class LiveTrader:
     def get_stats(self) -> dict:
         with self._lock:
             wins = [r for r in self.results if r["win"]]
-            losses = [r for r in self.results if not r["win"]]
             total_pnl = sum(r["pnl"] for r in self.results)
             return {
                 "total_trades": self.total_trades,
                 "completed": len(self.results),
                 "wins": len(wins),
-                "losses": len(losses),
+                "losses": len(self.results) - len(wins),
                 "win_rate": len(wins) / len(self.results) * 100 if self.results else 0,
                 "total_pnl": total_pnl,
                 "open_count": len(self.open_positions),
