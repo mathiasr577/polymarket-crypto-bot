@@ -171,9 +171,15 @@ class PaperTrader:
 
             side = trade["side"]
             size = trade["size"]
+            entry_price = trade.get("price", 0.5)
             win = (side == outcome)
-            pnl = size if win else -size
-            self.balance += size + pnl
+            if win:
+                # Realistic: return depends on entry price, minus 7% fee
+                pnl = size * ((1.0 - entry_price) / entry_price) * (1 - 0.07)
+            else:
+                pnl = -size
+            # On win: get back size + profit. On loss: lose size.
+            self.balance += size + pnl if win else 0
             self._save_balance()
 
             if self.conn:
