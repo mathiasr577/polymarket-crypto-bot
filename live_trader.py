@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 logger = logging.getLogger(__name__)
 
 MAX_LIVE_TRADES = 999
-TRADE_SIZE = 10.0
+TRADE_SIZE = 5.0
 
 class LiveTrader:
     def __init__(self):
