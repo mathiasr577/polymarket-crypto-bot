@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 # Thresholds basados en backtests del build guide
 DELTA_STRONG = 0.0015   # 0.10% → señal fuerte, entrar
 DELTA_MEDIUM = 0.0008   # 0.05% → señal media, entrar si otros confirman
-ENTRY_WINDOW_START = 60  # Entrar entre T-60s y T-10s del cierre
+ENTRY_WINDOW_START = 100  # Entrar entre T-100s y T-10s del cierre
 ENTRY_WINDOW_END = 10    # No entrar si quedan menos de 10s
 
 def generate_signal(indicators: dict, market: dict) -> dict:
