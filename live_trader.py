@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 logger = logging.getLogger(__name__)
 
 MAX_LIVE_TRADES = 999
-TRADE_SIZE = 5.0
+TRADE_SIZE = 10.0
 
 class LiveTrader:
     def __init__(self):
@@ -64,10 +64,13 @@ class LiveTrader:
             t0 = time.time()
 
             from order_executor import place_order
+            # Calculate shares so we spend exactly TRADE_SIZE in capital
+            # shares = capital / price, rounded down to 2 decimals
+            shares = round(TRADE_SIZE / price, 2)
             resp = place_order(
                 token_id=token_id,
                 price=round(price, 2),
-                size=TRADE_SIZE,
+                size=shares,
                 side="BUY"
             )
 
