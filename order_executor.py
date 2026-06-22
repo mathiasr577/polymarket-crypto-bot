@@ -35,12 +35,14 @@ def place_order(token_id: str, price: float, size: float, side: str = "BUY") -> 
     if not client:
         return {"error": "No CLOB client"}
     try:
-        from py_clob_client_v2.clob_types import MarketOrderArgs
-        # Market order — spends exactly `amount` USDC at best price
+        from py_clob_client_v2.clob_types import MarketOrderArgsV2, OrderType
+        # FOK = Fill or Kill: executes immediately at best price or cancels
         amount_usdc = round(size * price, 2)
-        resp = client.create_and_post_market_order(MarketOrderArgs(
+        resp = client.create_and_post_market_order(MarketOrderArgsV2(
             token_id=token_id,
             amount=amount_usdc,
+            side=side,
+            order_type=OrderType.FOK,
         ))
         logger.info(f"Market order placed: {resp}")
         return resp
