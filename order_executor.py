@@ -14,7 +14,6 @@ def get_client():
         return _client
     try:
         from py_clob_client_v2 import ClobClient
-        from py_clob_client_v2.clob_types import ApiCreds
         _client = ClobClient(
             host=CLOB_HOST,
             chain_id=CHAIN_ID,
@@ -36,18 +35,30 @@ def place_order(token_id: str, price: float, size: float, side: str = "BUY") -> 
     if not client:
         return {"error": "No CLOB client"}
     try:
-        from py_clob_client_v2.clob_types import OrderArgs
-        resp = client.create_and_post_order(OrderArgs(
+        from py_clob_client_v2.clob_types import MarketOrderArgs
+        # Market order — spends exactly `amount` USDC at best price
+        amount_usdc = round(size * price, 2)
+        resp = client.create_and_post_market_order(MarketOrderArgs(
             token_id=token_id,
-            price=round(price, 4),
-            size=round(size, 2),
-            side=side,
+            amount=amount_usdc,
         ))
-        logger.info(f"Order placed: {resp}")
+        logger.info(f"Market order placed: {resp}")
         return resp
     except Exception as e:
-        logger.error(f"Order error: {e}")
-        return {"error": str(e)}
+        logger.warning(f"Market order failed: {e} — trying limit order")
+        try:
+            from py_clob_client_v2.clob_types import OrderArgs
+            resp = client.create_and_post_order(OrderArgs(
+                token_id=token_id,
+                price=round(price, 4),
+                size=round(size, 2),
+                side=side,
+            ))
+            logger.info(f"Limit order placed: {resp}")
+            return resp
+        except Exception as e2:
+            logger.error(f"Order error: {e2}")
+            return {"error": str(e2)}
 
 
 def get_balance() -> float:
