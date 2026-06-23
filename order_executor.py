@@ -37,7 +37,8 @@ def place_order(token_id: str, price: float, size: float, side: str = "BUY") -> 
     try:
         from py_clob_client_v2.clob_types import MarketOrderArgsV2, OrderType
         # FOK = Fill or Kill: executes immediately at best price or cancels
-        amount_usdc = round(size * price, 2)
+        # amount must have exactly 2 decimal places
+        amount_usdc = float(f"{size * price:.2f}")
         resp = client.create_and_post_market_order(MarketOrderArgsV2(
             token_id=token_id,
             amount=amount_usdc,
@@ -47,20 +48,8 @@ def place_order(token_id: str, price: float, size: float, side: str = "BUY") -> 
         logger.info(f"Market order placed: {resp}")
         return resp
     except Exception as e:
-        logger.warning(f"Market order failed: {e} — trying limit order")
-        try:
-            from py_clob_client_v2.clob_types import OrderArgs
-            resp = client.create_and_post_order(OrderArgs(
-                token_id=token_id,
-                price=round(price, 4),
-                size=round(size, 2),
-                side=side,
-            ))
-            logger.info(f"Limit order placed: {resp}")
-            return resp
-        except Exception as e2:
-            logger.error(f"Order error: {e2}")
-            return {"error": str(e2)}
+        logger.warning(f"Market order failed: {e} — skipping")
+        return {"error": str(e)}
 
 
 def get_balance() -> float:
