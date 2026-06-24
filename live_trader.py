@@ -1,5 +1,6 @@
 """
 Live trader — ejecuta órdenes reales en Polymarket.
+$5 por trade, market orders FAK solamente.
 """
 import logging
 import threading
@@ -8,7 +9,7 @@ from datetime import datetime, timezone
 logger = logging.getLogger(__name__)
 
 MAX_LIVE_TRADES = 999
-TRADE_SIZE = 10.0
+TRADE_SIZE = 5.0  # $5 de capital por trade
 
 class LiveTrader:
     def __init__(self):
@@ -64,8 +65,7 @@ class LiveTrader:
             t0 = time.time()
 
             from order_executor import place_order
-            # Calculate shares so we spend exactly TRADE_SIZE in capital
-            # shares = capital / price, rounded down to 2 decimals
+            # shares = capital / price so we spend exactly TRADE_SIZE
             shares = round(TRADE_SIZE / price, 2)
             resp = place_order(
                 token_id=token_id,
@@ -76,25 +76,18 @@ class LiveTrader:
 
             latency = time.time() - t0
 
+            # Mark as attempted regardless of outcome
+            with self._lock:
+                self.attempted_markets.add(market_id)
+
             if "error" in resp:
                 logger.error(f"Order failed: {resp['error']}")
                 return False
 
-            # Mark as attempted
-            with self._lock:
-                self.attempted_markets.add(market_id)
-
-            # If order not matched = no liquidity, cancel it
+            # If not matched = no liquidity, skip
             status = resp.get("status", "")
-            if status == "live":
-                logger.warning(f"Order not filled (no liquidity) — cancelling")
-                try:
-                    order_id = resp.get("orderID", "")
-                    if order_id and self._client:
-                        self._client.cancel(order_id)
-                        logger.info(f"Order cancelled")
-                except Exception as ce:
-                    logger.debug(f"Cancel error: {ce}")
+            if status != "matched":
+                logger.warning(f"Order not matched (status={status}) — skipping")
                 return False
 
             with self._lock:
@@ -130,7 +123,6 @@ class LiveTrader:
             trade = self.open_positions.pop(market_id, None)
             if not trade:
                 return
-
             side = trade["side"]
             win = (side == outcome)
             entry_price = trade["price"]
@@ -138,10 +130,8 @@ class LiveTrader:
                 pnl = TRADE_SIZE * ((1.0 - entry_price) / entry_price) * (1 - 0.07)
             else:
                 pnl = -TRADE_SIZE
-
             result = {**trade, "outcome": outcome, "win": win, "pnl": pnl}
             self.results.append(result)
-
             logger.info(
                 f"LIVE RESULT: {'WIN' if win else 'LOSS'} "
                 f"{side} {trade['asset'].upper()} | "

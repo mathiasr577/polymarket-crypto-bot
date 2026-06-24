@@ -1,20 +1,15 @@
 """
-Estrategia basada en el build guide real:
-- Entrar a T-10 segundos antes del cierre
-- Señal principal: delta del precio vs precio de referencia del mercado
-- Si BTC ya bajó X% desde el inicio → DOWN casi seguro
-- Si BTC ya subió X% desde el inicio → UP casi seguro
-- Si neutral → no apostar
+Estrategia basada en delta del precio vs precio de referencia del mercado.
+Entra a T-60s antes del cierre cuando hay señal clara.
 """
 import logging
 
 logger = logging.getLogger(__name__)
 
-# Thresholds basados en backtests del build guide
-DELTA_STRONG = 0.0015   # 0.10% → señal fuerte, entrar
-DELTA_MEDIUM = 0.0008   # 0.05% → señal media, entrar si otros confirman
-ENTRY_WINDOW_START = 100  # Entrar entre T-100s y T-10s del cierre
-ENTRY_WINDOW_END = 10    # No entrar si quedan menos de 10s
+DELTA_STRONG = 0.0015   # 0.15% → señal fuerte
+DELTA_MEDIUM = 0.0008   # 0.08% → señal media
+ENTRY_WINDOW_START = 60  # Entrar entre T-60s y T-10s
+ENTRY_WINDOW_END = 10
 
 def generate_signal(indicators: dict, market: dict) -> dict:
     result = {
@@ -35,7 +30,6 @@ def generate_signal(indicators: dict, market: dict) -> dict:
 
     seconds_left = market.get("seconds_left", 300)
 
-    # ── Ventana de entrada: entre T-60s y T-10s ──────────────────────
     if seconds_left > ENTRY_WINDOW_START:
         result["blocked"] = True
         result["block_reason"] = f"Too early: {seconds_left:.0f}s left (wait until T-60s)"
@@ -46,7 +40,6 @@ def generate_signal(indicators: dict, market: dict) -> dict:
         result["block_reason"] = f"Too late: {seconds_left:.0f}s left"
         return result
 
-    # ── Factor 1 (PRINCIPAL): Delta precio actual vs referencia ───────
     current_price = indicators.get("price")
     ref_price = market.get("ref_price")
 
@@ -62,16 +55,13 @@ def generate_signal(indicators: dict, market: dict) -> dict:
     reasons = {"UP": [], "DOWN": []}
 
     if abs_delta >= DELTA_STRONG:
-        # Señal fuerte — el precio ya se movió significativamente
         if delta > 0:
             votes["UP"] += 3
             reasons["UP"].append(f"Price +{delta*100:.3f}% above ref ${ref_price:,.0f} → UP locked")
         else:
             votes["DOWN"] += 3
             reasons["DOWN"].append(f"Price {delta*100:.3f}% below ref ${ref_price:,.0f} → DOWN locked")
-
     elif abs_delta >= DELTA_MEDIUM:
-        # Señal media — necesita confirmación
         if delta > 0:
             votes["UP"] += 2
             reasons["UP"].append(f"Price +{delta*100:.3f}% above ref → leaning UP")
@@ -79,12 +69,10 @@ def generate_signal(indicators: dict, market: dict) -> dict:
             votes["DOWN"] += 2
             reasons["DOWN"].append(f"Price {delta*100:.3f}% below ref → leaning DOWN")
     else:
-        # Delta muy pequeño — mercado muy incierto, no apostar
         result["blocked"] = True
         result["block_reason"] = f"Delta too small: {delta*100:.4f}% (need ±{DELTA_MEDIUM*100:.2f}%)"
         return result
 
-    # ── Factor 2: Momentum últimos 2 minutos ─────────────────────────
     momentum = indicators.get("momentum", "neutral")
     pct_2min = indicators.get("pct_2min", 0)
 
@@ -95,19 +83,15 @@ def generate_signal(indicators: dict, market: dict) -> dict:
         votes["DOWN"] += 1
         reasons["DOWN"].append(f"Momentum confirms DOWN ({pct_2min*100:.3f}%)")
     elif (momentum == "up" and delta < 0) or (momentum == "down" and delta > 0):
-        # Momentum contradice el delta — reducir confianza
         if votes["UP"] > 0:
             votes["UP"] = max(0, votes["UP"] - 1)
         if votes["DOWN"] > 0:
             votes["DOWN"] = max(0, votes["DOWN"] - 1)
 
-    # ── Factor 3: Token price — evitar tokens muy caros ──────────────
     up_price = market.get("up_price", 0.5)
     down_price = market.get("down_price", 0.5)
 
-    # Filtro de precio: entre 0.25 y 0.80 solamente
-    # < 0.25 = sin liquidez, orden nunca se llena
-    # > 0.80 = poco upside
+    # Filtro de precio: solo entre 0.25 y 0.80
     if votes["UP"] >= votes["DOWN"]:
         if up_price > 0.80:
             result["blocked"] = True
@@ -127,11 +111,8 @@ def generate_signal(indicators: dict, market: dict) -> dict:
             result["block_reason"] = f"DOWN token no liquidity: {down_price:.2f}"
             return result
 
-    # ── Evaluar ───────────────────────────────────────────────────────
-    up_score = votes["UP"]
-    down_score = votes["DOWN"]
-    best_side = "UP" if up_score >= down_score else "DOWN"
-    best_score = max(up_score, down_score)
+    best_side = "UP" if votes["UP"] >= votes["DOWN"] else "DOWN"
+    best_score = max(votes["UP"], votes["DOWN"])
 
     if best_score < 2:
         result["blocked"] = True
@@ -158,19 +139,15 @@ def generate_signal(indicators: dict, market: dict) -> dict:
 
 def kelly_size(balance: float, win_rate: float, confidence: str) -> float:
     from config import MAX_POSITION_PCT, MAX_POSITION_PCT_KELLY, MIN_TRADE_USD
-
-    # Sanity check balance
     if balance <= 0 or balance > 100000:
         return MIN_TRADE_USD
-
     if win_rate < 0.52:
         win_rate = 0.55
     kelly_f = win_rate - (1 - win_rate)
     kelly_f = max(0.02, min(kelly_f, 0.5))
-
     multiplier = 1.5 if confidence == "HIGH" else 1.0
     size = balance * MAX_POSITION_PCT * kelly_f * multiplier
     size = min(size, balance * MAX_POSITION_PCT_KELLY)
-    size = min(size, 25.0)  # Hard cap: max 5 per trade
+    size = min(size, 25.0)
     size = max(size, MIN_TRADE_USD)
     return round(size, 2)
