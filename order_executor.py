@@ -1,6 +1,6 @@
 """
 Real order executor — only used when PAPER_TRADING=false
-Market orders only (FAK). Verifies real price before executing.
+Market orders only (FAK). No limit order fallback.
 """
 import logging
 from config import PRIVATE_KEY, FUNDER, CHAIN_ID, CLOB_HOST
@@ -31,47 +31,16 @@ def get_client():
     return _client
 
 
-def get_best_ask(token_id: str) -> float:
-    """Get the real best ask price from the order book."""
-    client = get_client()
-    if not client:
-        return 1.0
-    try:
-        book = client.get_order_book(token_id)
-        asks = book.asks if hasattr(book, 'asks') else []
-        if asks:
-            # asks are sorted ascending, first is best ask
-            best = float(asks[0].price)
-            logger.info(f"Best ask for token: {best:.3f}")
-            return best
-        return 1.0
-    except Exception as e:
-        logger.debug(f"Order book error: {e}")
-        return 1.0
-
-
 def place_order(token_id: str, price: float, size: float, side: str = "BUY") -> dict:
     client = get_client()
     if not client:
         return {"error": "No CLOB client"}
 
-    # Check real price in order book before executing
-    real_price = get_best_ask(token_id)
-
-    if real_price > 0.80:
-        logger.warning(f"Real price {real_price:.3f} > 0.80 — skipping, too expensive")
-        return {"error": f"real price too high: {real_price:.3f}"}
-
-    if real_price < 0.20:
-        logger.warning(f"Real price {real_price:.3f} < 0.20 — skipping, no liquidity")
-        return {"error": f"real price too low: {real_price:.3f}"}
-
-    logger.info(f"Real price {real_price:.3f} OK — executing FAK order")
-
+    # price comes from signal_engine which already filters 0.25-0.80
+    # Trust it and execute FAK directly
     try:
         from py_clob_client_v2.clob_types import MarketOrderArgsV2, OrderType
-        # Use real price for amount calculation
-        amount_usdc = float(f"{size * real_price:.2f}")
+        amount_usdc = float(f"{size * price:.2f}")
         resp = client.create_and_post_market_order(MarketOrderArgsV2(
             token_id=token_id,
             amount=amount_usdc,
