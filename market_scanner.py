@@ -62,6 +62,24 @@ class MarketScanner:
                 )
             )
 
+    def _get_clob_price(self, token_id: str) -> float | None:
+        """Get real ask price for a specific token from CLOB order book."""
+        try:
+            r = requests.get(
+                "https://clob.polymarket.com/book",
+                params={"token_id": token_id},
+                timeout=5
+            )
+            if r.status_code != 200:
+                return None
+            data = r.json()
+            asks = data.get("asks", [])
+            if not asks:
+                return None
+            return float(asks[0].get("price", 1.0))
+        except Exception:
+            return None
+
     def _fetch(self, slug: str, asset: str) -> dict | None:
         try:
             r = requests.get(
@@ -101,27 +119,6 @@ class MarketScanner:
             if "UP" not in tokens or "DOWN" not in tokens:
                 return None
 
-            # Use bestAsk for UP and DOWN — this is the real current price
-            # bestAsk = price you pay to buy that token right now
-            best_ask_up = float(m.get("bestAsk", 0.5) or 0.5)
-            best_bid_up = float(m.get("bestBid", 0.5) or 0.5)
-
-            # outcomePrices gives [up_price, down_price] as last trade prices
-            prices = self._parse_json(m.get("outcomePrices")) or ["0.5", "0.5"]
-            up_price_last = 0.5
-            down_price_last = 0.5
-            for i, o in enumerate(outcomes):
-                k = o.strip().upper()
-                if k == "UP" and i < len(prices):
-                    up_price_last = float(prices[i])
-                elif k == "DOWN" and i < len(prices):
-                    down_price_last = float(prices[i])
-
-            # Use bestAsk as the real price to pay for UP token
-            # If bestAsk not available, fall back to outcomePrices
-            up_price = best_ask_up if best_ask_up > 0.01 else up_price_last
-            down_price = round(1.0 - up_price, 4)  # UP + DOWN = 1.0
-
             end_dt = self._parse_dt(
                 m.get("endDate") or m.get("endDateIso") or event.get("endDate") or ""
             )
@@ -133,6 +130,17 @@ class MarketScanner:
 
             if seconds_left < -30:
                 return None
+
+            # Only fetch real CLOB prices for markets close to entry window
+            # to avoid too many API calls
+            if -30 < seconds_left < 120:
+                up_price = self._get_clob_price(tokens["UP"])
+                down_price = self._get_clob_price(tokens["DOWN"])
+                if up_price is None or down_price is None:
+                    # Fall back to outcomePrices
+                    up_price, down_price = self._get_outcome_prices(m, outcomes)
+            else:
+                up_price, down_price = self._get_outcome_prices(m, outcomes)
 
             ref_price = self._get_ref_price(m, event, asset)
 
@@ -152,6 +160,18 @@ class MarketScanner:
         except Exception as e:
             logger.debug(f"Fetch {slug}: {e}")
             return None
+
+    def _get_outcome_prices(self, m: dict, outcomes: list) -> tuple:
+        prices = self._parse_json(m.get("outcomePrices")) or ["0.5", "0.5"]
+        up_price = 0.5
+        down_price = 0.5
+        for i, o in enumerate(outcomes):
+            k = o.strip().upper()
+            if k == "UP" and i < len(prices):
+                up_price = float(prices[i])
+            elif k == "DOWN" and i < len(prices):
+                down_price = float(prices[i])
+        return up_price, down_price
 
     def _get_ref_price(self, market: dict, event: dict, asset: str) -> float | None:
         import re
