@@ -1,6 +1,7 @@
 """
-Real order executor — LIMIT order with immediate cancel if not filled.
-Prevents slippage: order only executes at or below scanner price.
+Real order executor — only used when PAPER_TRADING=false
+Uses LIMIT order with 3% slippage tolerance.
+Cancels immediately if not filled.
 """
 import logging
 import time
@@ -38,9 +39,8 @@ def get_client():
 def place_order(token_id: str, price: float, size: float, side: str = "BUY",
                 alt_token_id: str = None) -> dict:
     """
-    Place LIMIT order at scanner price.
-    Wait 2s — if not matched, cancel immediately.
-    This prevents buying at 0.99 when scanner shows 0.52.
+    Place LIMIT order with 3% slippage tolerance.
+    If not filled in 2s, cancel immediately.
     """
     client = get_client()
     if not client:
@@ -50,12 +50,14 @@ def place_order(token_id: str, price: float, size: float, side: str = "BUY",
         logger.warning(f"Scanner price {price:.2f} out of range — skipping")
         return {"error": f"scanner price out of range: {price:.2f}"}
 
-    limit_price = round(price, 2)
+    # Add 3% slippage tolerance to increase fill probability
+    # but never above MAX_PRICE
+    limit_price = round(min(price * 1.03, MAX_PRICE), 2)
     shares = round(size / price, 2)
 
     try:
-        from py_clob_client_v2.clob_types import OrderArgsV2
-        logger.info(f"LIMIT order: BUY {shares} shares @ {limit_price:.2f} (token={token_id[:20]}...)")
+        from py_clob_client_v2.clob_types import OrderArgsV2, OrderPayload
+        logger.info(f"LIMIT order: BUY {shares} shares @ {limit_price:.2f} (scanner={price:.2f}, token={token_id[:20]}...)")
 
         order_args = OrderArgsV2(
             token_id=token_id,
@@ -70,16 +72,13 @@ def place_order(token_id: str, price: float, size: float, side: str = "BUY",
         order_id = resp.get("orderID", "")
 
         if status == "matched":
-            # Filled immediately — perfect
-            logger.info(f"LIMIT order filled immediately ✅")
+            logger.info(f"LIMIT order filled immediately ✅ @ {limit_price:.2f}")
             return resp
 
         if status == "live" and order_id:
-            # Order is open — wait 2s then cancel
             logger.info(f"Order live, waiting 2s then cancelling...")
-            time.sleep(0.5)
+            time.sleep(2)
             try:
-                from py_clob_client_v2.clob_types import OrderPayload
                 cancel_resp = client.cancel_order(OrderPayload(orderID=order_id))
                 logger.info(f"Order cancelled: {cancel_resp}")
             except Exception as ce:
