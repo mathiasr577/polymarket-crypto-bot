@@ -1,18 +1,12 @@
 """
 Real order executor — only used when PAPER_TRADING=false
-Validates with CLOB /price and /book before executing FAK.
-Auto-detects if token IDs are swapped.
+The scanner already validates prices via CLOB /price.
+We trust the scanner price and execute FAK directly.
 """
 import logging
-import requests
-from decimal import Decimal
 from config import PRIVATE_KEY, FUNDER, CHAIN_ID, CLOB_HOST
 
 logger = logging.getLogger(__name__)
-
-MIN_PRICE = Decimal("0.25")
-MAX_PRICE = Decimal("0.80")
-CLOB = "https://clob.polymarket.com"
 
 _client = None
 
@@ -38,108 +32,28 @@ def get_client():
     return _client
 
 
-def _clob_get(path, params, timeout=2.0):
-    r = requests.get(f"{CLOB}{path}", params=params, timeout=timeout)
-    r.raise_for_status()
-    return r.json()
-
-
-def get_buy_price(token_id: str) -> Decimal | None:
-    try:
-        data = _clob_get("/price", {"token_id": token_id, "side": "BUY"})
-        price = Decimal(str(data["price"]))
-        return price if price > 0 else None
-    except Exception as e:
-        logger.debug(f"CLOB /price error: {e}")
-        return None
-
-
-def liquidity_ok(token_id: str, amount_usdc: float) -> tuple:
-    amount = Decimal(str(round(amount_usdc, 2)))
-
-    buy_price = get_buy_price(token_id)
-    if buy_price is None:
-        return False, "no CLOB buy price", None
-
-    if buy_price < MIN_PRICE or buy_price > MAX_PRICE:
-        return False, f"buy price out of range: {buy_price}", buy_price
-
-    try:
-        book = _clob_get("/book", {"token_id": token_id})
-        asks = book.get("asks", [])
-        asks = sorted(asks, key=lambda x: Decimal(str(x["price"])))
-
-        remaining = amount
-        weighted_cost = Decimal("0")
-        total_shares = Decimal("0")
-
-        for level in asks:
-            price = Decimal(str(level["price"]))
-            size = Decimal(str(level["size"]))
-
-            if price > MAX_PRICE:
-                break
-
-            level_cost = price * size
-            take_cost = min(remaining, level_cost)
-            take_shares = take_cost / price
-
-            weighted_cost += take_cost
-            total_shares += take_shares
-            remaining -= take_cost
-
-            if remaining <= Decimal("0"):
-                avg_price = weighted_cost / total_shares
-                return True, f"liquidity ok avg={avg_price:.4f}", avg_price
-
-        if amount <= Decimal("5"):
-            return True, f"book thin, using /price fallback: {buy_price}", buy_price
-
-        return False, "not enough ask liquidity", buy_price
-
-    except Exception as e:
-        if amount <= Decimal("5"):
-            return True, f"book failed, /price fallback: {buy_price}", buy_price
-        return False, f"book failed: {e}", buy_price
-
-
 def place_order(token_id: str, price: float, size: float, side: str = "BUY",
                 alt_token_id: str = None) -> dict:
     """
-    Place FAK order. If token_id price is out of range but alt_token_id
-    is in range, use alt_token_id instead (handles swapped token IDs).
+    Execute FAK order. Price already validated by scanner via CLOB /price.
+    Scanner guarantees price is between 0.25 and 0.80.
     """
     client = get_client()
     if not client:
         return {"error": "No CLOB client"}
 
-    amount_usdc = round(size * price, 2)
-
-    # Try primary token
-    ok, reason, real_price = liquidity_ok(token_id, amount_usdc)
-
-    # If primary token is out of range and we have an alt token, try it
-    if not ok and alt_token_id and "out of range" in reason:
-        logger.warning(f"Primary token out of range ({reason}), trying alt token")
-        ok_alt, reason_alt, real_price_alt = liquidity_ok(alt_token_id, amount_usdc)
-        if ok_alt:
-            logger.info(f"Using alt token — {reason_alt}")
-            token_id = alt_token_id
-            ok = ok_alt
-            reason = reason_alt
-            real_price = real_price_alt
-
-    if not ok:
-        logger.warning(f"SKIP: {reason}")
-        return {"error": reason}
-
-    logger.info(f"EXECUTE: {reason}")
+    # Price already validated by scanner — just execute
+    if price > 0.80 or price < 0.25:
+        logger.warning(f"Scanner price {price:.2f} out of range — skipping")
+        return {"error": f"scanner price out of range: {price:.2f}"}
 
     try:
         from py_clob_client_v2.clob_types import MarketOrderArgsV2, OrderType
+        amount_usdc = float(f"{size * price:.2f}")
+        logger.info(f"Executing FAK: token={token_id[:20]}... amount=${amount_usdc} price={price:.2f}")
         resp = client.create_and_post_market_order(MarketOrderArgsV2(
             token_id=token_id,
-            amount=float(amount_usdc),
+            amount=amount_usdc,
             side=side,
             order_type=OrderType.FAK,
         ))
