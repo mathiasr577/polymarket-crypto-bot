@@ -37,7 +37,12 @@ class MarketScanner:
                 self._scan()
             except Exception as e:
                 logger.error(f"MarketScanner error: {e}")
-            time.sleep(SCAN_INTERVAL)
+            
+            # Dynamic interval: 2s when any market is within 90s, else 30s
+            markets = self.active_markets
+            near_close = any(0 < m.get("seconds_left", 999) < 90 for m in markets)
+            interval = 2 if near_close else 30
+            time.sleep(interval)
 
     def _scan(self):
         now_ts = int(time.time())
@@ -110,14 +115,13 @@ class MarketScanner:
             if not outcomes or not token_ids or len(outcomes) < 2:
                 return None
 
-            # Build initial token map from outcomes array
-            tokens_by_label = {}
+            tokens = {}
             for i, o in enumerate(outcomes):
                 k = o.strip().upper()
                 if i < len(token_ids):
-                    tokens_by_label[k] = str(token_ids[i])
+                    tokens[k] = str(token_ids[i])
 
-            if "UP" not in tokens_by_label or "DOWN" not in tokens_by_label:
+            if "UP" not in tokens or "DOWN" not in tokens:
                 return None
 
             end_dt = self._parse_dt(
@@ -132,27 +136,14 @@ class MarketScanner:
             if seconds_left < -30:
                 return None
 
-            # Get real prices from CLOB /price for both tokens
+            # For markets close to entry window, get REAL prices from CLOB /price
             if -30 < seconds_left < 120:
-                price_a = self._get_clob_buy_price(tokens_by_label["UP"])
-                price_b = self._get_clob_buy_price(tokens_by_label["DOWN"])
-
-                if price_a is not None and price_b is not None:
-                    # Verify token assignment is correct:
-                    # The token labeled "UP" should have a price that makes sense
-                    # Both tokens together represent the market
-                    # If price_a > price_b, token_a is the winning side
-                    # We trust the label from Polymarket but log for verification
-                    up_price = price_a
-                    down_price = price_b
-                    logger.debug(f"CLOB prices - UP token: {up_price:.3f}, DOWN token: {down_price:.3f}")
-                else:
+                up_price = self._get_clob_buy_price(tokens["UP"])
+                down_price = self._get_clob_buy_price(tokens["DOWN"])
+                if up_price is None or down_price is None:
                     up_price, down_price = self._get_outcome_prices(m, outcomes)
             else:
                 up_price, down_price = self._get_outcome_prices(m, outcomes)
-
-            # Final tokens map — trust Polymarket labels
-            tokens = tokens_by_label
 
             ref_price = self._get_ref_price(m, event, asset)
 
