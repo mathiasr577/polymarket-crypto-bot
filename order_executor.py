@@ -77,7 +77,7 @@ def place_order(token_id: str, price: float, size: float, side: str = "BUY",
 
         if status == "live" and order_id:
             logger.info(f"Order live, waiting 2s then cancelling...")
-            time.sleep(2)
+            time.sleep(20)
             try:
                 cancel_resp = client.cancel_order(OrderPayload(orderID=order_id))
                 logger.info(f"Order cancelled: {cancel_resp}")
