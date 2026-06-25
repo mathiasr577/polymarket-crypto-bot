@@ -1,10 +1,9 @@
 """
-Real order executor — only used when PAPER_TRADING=false
-Uses LIMIT order with max price 0.80 — if ask > 0.80, cancels automatically.
-This solves the slippage problem: FAK market orders were buying at 0.99
-even when scanner showed 0.52.
+Real order executor — LIMIT order with immediate cancel if not filled.
+Prevents slippage: order only executes at or below scanner price.
 """
 import logging
+import time
 from config import PRIVATE_KEY, FUNDER, CHAIN_ID, CLOB_HOST
 
 logger = logging.getLogger(__name__)
@@ -39,9 +38,9 @@ def get_client():
 def place_order(token_id: str, price: float, size: float, side: str = "BUY",
                 alt_token_id: str = None) -> dict:
     """
-    Place a LIMIT order at max price 0.80.
-    If the real ask > 0.80, the order is cancelled automatically.
-    This prevents buying tokens at 0.99 when scanner showed 0.52.
+    Place LIMIT order at scanner price.
+    Wait 2s — if not matched, cancel immediately.
+    This prevents buying at 0.99 when scanner shows 0.52.
     """
     client = get_client()
     if not client:
@@ -51,14 +50,13 @@ def place_order(token_id: str, price: float, size: float, side: str = "BUY",
         logger.warning(f"Scanner price {price:.2f} out of range — skipping")
         return {"error": f"scanner price out of range: {price:.2f}"}
 
-    # Use scanner price as limit price — won't execute above it
     limit_price = round(price, 2)
     shares = round(size / price, 2)
 
     try:
         from py_clob_client_v2.clob_types import OrderArgsV2
-        logger.info(f"Placing LIMIT order: {side} {shares} shares @ max {limit_price:.2f} (token={token_id[:20]}...)")
-        
+        logger.info(f"LIMIT order: BUY {shares} shares @ {limit_price:.2f} (token={token_id[:20]}...)")
+
         order_args = OrderArgsV2(
             token_id=token_id,
             price=limit_price,
@@ -66,8 +64,29 @@ def place_order(token_id: str, price: float, size: float, side: str = "BUY",
             side=side,
         )
         resp = client.create_and_post_order(order_args)
-        logger.info(f"Limit order placed: {resp}")
-        return resp
+        logger.info(f"Order response: {resp}")
+
+        status = resp.get("status", "")
+        order_id = resp.get("orderID", "")
+
+        if status == "matched":
+            # Filled immediately — perfect
+            logger.info(f"LIMIT order filled immediately ✅")
+            return resp
+
+        if status == "live" and order_id:
+            # Order is open — wait 2s then cancel
+            logger.info(f"Order live, waiting 2s then cancelling...")
+            time.sleep(0.5)
+            try:
+                cancel_resp = client.cancel_order(order_id)
+                logger.info(f"Order cancelled: {cancel_resp}")
+            except Exception as ce:
+                logger.warning(f"Cancel failed: {ce}")
+            return {"error": "limit not filled, cancelled"}
+
+        return {"error": f"unexpected status: {status}"}
+
     except Exception as e:
         logger.warning(f"Limit order failed: {e} — skipping")
         return {"error": str(e)}
