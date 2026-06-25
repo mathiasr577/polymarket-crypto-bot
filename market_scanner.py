@@ -13,6 +13,8 @@ ASSETS = {
     "eth": "ethereum",
 }
 
+CLOB = "https://clob.polymarket.com"
+
 class MarketScanner:
     def __init__(self):
         self.active_markets = []
@@ -62,21 +64,19 @@ class MarketScanner:
                 )
             )
 
-    def _get_clob_price(self, token_id: str) -> float | None:
-        """Get real ask price for a specific token from CLOB order book."""
+    def _get_clob_buy_price(self, token_id: str) -> float | None:
+        """Get real executable BUY price from CLOB /price endpoint."""
         try:
             r = requests.get(
-                "https://clob.polymarket.com/book",
-                params={"token_id": token_id},
-                timeout=5
+                f"{CLOB}/price",
+                params={"token_id": token_id, "side": "BUY"},
+                timeout=2.0
             )
             if r.status_code != 200:
                 return None
             data = r.json()
-            asks = data.get("asks", [])
-            if not asks:
-                return None
-            return float(asks[0].get("price", 1.0))
+            price = float(data.get("price", 0))
+            return price if price > 0 else None
         except Exception:
             return None
 
@@ -131,13 +131,12 @@ class MarketScanner:
             if seconds_left < -30:
                 return None
 
-            # Only fetch real CLOB prices for markets close to entry window
-            # to avoid too many API calls
+            # For markets approaching entry window, get REAL prices from CLOB /price
             if -30 < seconds_left < 120:
-                up_price = self._get_clob_price(tokens["UP"])
-                down_price = self._get_clob_price(tokens["DOWN"])
+                up_price = self._get_clob_buy_price(tokens["UP"])
+                down_price = self._get_clob_buy_price(tokens["DOWN"])
+                # Fall back to outcomePrices only if CLOB fails
                 if up_price is None or down_price is None:
-                    # Fall back to outcomePrices
                     up_price, down_price = self._get_outcome_prices(m, outcomes)
             else:
                 up_price, down_price = self._get_outcome_prices(m, outcomes)
