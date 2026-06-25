@@ -1,222 +1,153 @@
-import requests
+"""
+Estrategia basada en delta del precio vs precio de referencia del mercado.
+Entra a T-60s antes del cierre cuando hay señal clara.
+"""
 import logging
-import time
-import json
-import threading
-from datetime import datetime, timezone
-from config import GAMMA_API, SCAN_INTERVAL
 
 logger = logging.getLogger(__name__)
 
-ASSETS = {
-    "btc": "bitcoin",
-    "eth": "ethereum",
-}
+DELTA_STRONG = 0.0015   # 0.15% → señal fuerte
+DELTA_MEDIUM = 0.0008   # 0.08% → señal media
+ENTRY_WINDOW_START = 60  # Entrar entre T-60s y T-10s
+ENTRY_WINDOW_END = 10
 
-CLOB = "https://clob.polymarket.com"
+def generate_signal(indicators: dict, market: dict) -> dict:
+    result = {
+        "side": None,
+        "confidence": None,
+        "score": 0,
+        "reasons": [],
+        "blocked": False,
+        "block_reason": "",
+        "token_id": None,
+        "entry_price": None,
+    }
 
-class MarketScanner:
-    def __init__(self):
-        self.active_markets = []
-        self._lock = threading.Lock()
-        self._running = False
-        self._thread = None
+    if indicators is None:
+        result["blocked"] = True
+        result["block_reason"] = "No indicators yet"
+        return result
 
-    def start(self):
-        self._running = True
-        self._thread = threading.Thread(target=self._loop, daemon=True)
-        self._thread.start()
-        logger.info("MarketScanner started")
+    seconds_left = market.get("seconds_left", 300)
 
-    def stop(self):
-        self._running = False
+    if seconds_left > ENTRY_WINDOW_START:
+        result["blocked"] = True
+        result["block_reason"] = f"Too early: {seconds_left:.0f}s left (wait until T-60s)"
+        return result
 
-    def _loop(self):
-        while self._running:
-            try:
-                self._scan()
-            except Exception as e:
-                logger.error(f"MarketScanner error: {e}")
-            time.sleep(SCAN_INTERVAL)
+    if seconds_left < ENTRY_WINDOW_END:
+        result["blocked"] = True
+        result["block_reason"] = f"Too late: {seconds_left:.0f}s left"
+        return result
 
-    def _scan(self):
-        now_ts = int(time.time())
-        current = (now_ts // 300) * 300
-        windows = [current - 300, current, current + 300, current + 600]
+    current_price = indicators.get("price")
+    ref_price = market.get("ref_price")
 
-        found = []
-        for prefix, asset in ASSETS.items():
-            for ts in windows:
-                slug = f"{prefix}-updown-5m-{ts}"
-                market = self._fetch(slug, asset)
-                if market:
-                    found.append(market)
+    if not current_price or not ref_price or ref_price == 0:
+        result["blocked"] = True
+        result["block_reason"] = "No reference price available"
+        return result
 
-        with self._lock:
-            self.active_markets = found
+    delta = (current_price - ref_price) / ref_price
+    abs_delta = abs(delta)
 
-        if found:
-            logger.info(
-                f"MarketScanner: {len(found)} markets | " +
-                " | ".join(
-                    f"{m['asset'].upper()} T-{m['seconds_left']:.0f}s UP={m['up_price']:.2f} DOWN={m['down_price']:.2f}"
-                    for m in found
-                )
-            )
+    votes = {"UP": 0, "DOWN": 0}
+    reasons = {"UP": [], "DOWN": []}
 
-    def _get_clob_buy_price(self, token_id: str) -> float | None:
-        """Get real executable BUY price from CLOB /price endpoint."""
-        try:
-            r = requests.get(
-                f"{CLOB}/price",
-                params={"token_id": token_id, "side": "BUY"},
-                timeout=2.0
-            )
-            if r.status_code != 200:
-                return None
-            data = r.json()
-            price = float(data.get("price", 0))
-            return price if price > 0 else None
-        except Exception:
-            return None
+    if abs_delta >= DELTA_STRONG:
+        if delta > 0:
+            votes["UP"] += 3
+            reasons["UP"].append(f"Price +{delta*100:.3f}% above ref ${ref_price:,.0f} → UP locked")
+        else:
+            votes["DOWN"] += 3
+            reasons["DOWN"].append(f"Price {delta*100:.3f}% below ref ${ref_price:,.0f} → DOWN locked")
+    elif abs_delta >= DELTA_MEDIUM:
+        if delta > 0:
+            votes["UP"] += 2
+            reasons["UP"].append(f"Price +{delta*100:.3f}% above ref → leaning UP")
+        else:
+            votes["DOWN"] += 2
+            reasons["DOWN"].append(f"Price {delta*100:.3f}% below ref → leaning DOWN")
+    else:
+        result["blocked"] = True
+        result["block_reason"] = f"Delta too small: {delta*100:.4f}% (need ±{DELTA_MEDIUM*100:.2f}%)"
+        return result
 
-    def _fetch(self, slug: str, asset: str) -> dict | None:
-        try:
-            r = requests.get(
-                f"{GAMMA_API}/events",
-                params={"slug": slug},
-                timeout=10,
-            )
-            if r.status_code != 200:
-                return None
+    momentum = indicators.get("momentum", "neutral")
+    pct_2min = indicators.get("pct_2min", 0)
 
-            data = r.json()
-            if not data:
-                return None
+    if momentum == "up" and pct_2min > 0 and delta > 0:
+        votes["UP"] += 1
+        reasons["UP"].append(f"Momentum confirms UP (+{pct_2min*100:.3f}%)")
+    elif momentum == "down" and pct_2min < 0 and delta < 0:
+        votes["DOWN"] += 1
+        reasons["DOWN"].append(f"Momentum confirms DOWN ({pct_2min*100:.3f}%)")
+    elif (momentum == "up" and delta < 0) or (momentum == "down" and delta > 0):
+        if votes["UP"] > 0:
+            votes["UP"] = max(0, votes["UP"] - 1)
+        if votes["DOWN"] > 0:
+            votes["DOWN"] = max(0, votes["DOWN"] - 1)
 
-            event = data[0] if isinstance(data, list) else data
-            markets = event.get("markets", [])
-            if not markets:
-                return None
+    up_price = market.get("up_price", 0.5)
+    down_price = market.get("down_price", 0.5)
 
-            m = markets[0]
+    # Filtro de precio: solo entre 0.25 y 0.80
+    if votes["UP"] >= votes["DOWN"]:
+        if up_price > 0.80:
+            result["blocked"] = True
+            result["block_reason"] = f"UP token too expensive: {up_price:.2f}"
+            return result
+        if up_price < 0.25:
+            result["blocked"] = True
+            result["block_reason"] = f"UP token no liquidity: {up_price:.2f}"
+            return result
+    else:
+        if down_price > 0.80:
+            result["blocked"] = True
+            result["block_reason"] = f"DOWN token too expensive: {down_price:.2f}"
+            return result
+        if down_price < 0.25:
+            result["blocked"] = True
+            result["block_reason"] = f"DOWN token no liquidity: {down_price:.2f}"
+            return result
 
-            if m.get("closed"):
-                return None
+    best_side = "UP" if votes["UP"] >= votes["DOWN"] else "DOWN"
+    best_score = max(votes["UP"], votes["DOWN"])
 
-            outcomes = self._parse_json(m.get("outcomes"))
-            token_ids = self._parse_json(m.get("clobTokenIds") or m.get("clob_token_ids"))
+    if best_score < 2:
+        result["blocked"] = True
+        result["block_reason"] = f"Signal too weak: score={best_score}"
+        return result
 
-            if not outcomes or not token_ids or len(outcomes) < 2:
-                return None
+    token_id = market["tokens"].get(best_side)
+    entry_price = up_price if best_side == "UP" else down_price
 
-            tokens = {}
-            for i, o in enumerate(outcomes):
-                k = o.strip().upper()
-                if i < len(token_ids):
-                    tokens[k] = str(token_ids[i])
+    result["side"] = best_side
+    result["score"] = best_score
+    result["confidence"] = "HIGH" if best_score >= 3 else "MEDIUM"
+    result["reasons"] = reasons[best_side]
+    result["token_id"] = token_id
+    result["entry_price"] = entry_price
 
-            if "UP" not in tokens or "DOWN" not in tokens:
-                return None
-
-            end_dt = self._parse_dt(
-                m.get("endDate") or m.get("endDateIso") or event.get("endDate") or ""
-            )
-            now = datetime.now(timezone.utc)
-            if not end_dt:
-                return None
-
-            seconds_left = (end_dt - now).total_seconds()
-
-            if seconds_left < -30:
-                return None
-
-            # For markets approaching entry window, get REAL prices from CLOB /price
-            if -30 < seconds_left < 120:
-                up_price = self._get_clob_buy_price(tokens["UP"])
-                down_price = self._get_clob_buy_price(tokens["DOWN"])
-                # Fall back to outcomePrices only if CLOB fails
-                if up_price is None or down_price is None:
-                    up_price, down_price = self._get_outcome_prices(m, outcomes)
-            else:
-                up_price, down_price = self._get_outcome_prices(m, outcomes)
-
-            ref_price = self._get_ref_price(m, event, asset)
-
-            return {
-                "id": str(m.get("id", "")),
-                "slug": slug,
-                "title": event.get("title") or slug,
-                "asset": asset,
-                "tokens": tokens,
-                "up_price": up_price,
-                "down_price": down_price,
-                "ref_price": ref_price,
-                "end_dt": end_dt,
-                "seconds_left": seconds_left,
-            }
-
-        except Exception as e:
-            logger.debug(f"Fetch {slug}: {e}")
-            return None
-
-    def _get_outcome_prices(self, m: dict, outcomes: list) -> tuple:
-        prices = self._parse_json(m.get("outcomePrices")) or ["0.5", "0.5"]
-        up_price = 0.5
-        down_price = 0.5
-        for i, o in enumerate(outcomes):
-            k = o.strip().upper()
-            if k == "UP" and i < len(prices):
-                up_price = float(prices[i])
-            elif k == "DOWN" and i < len(prices):
-                down_price = float(prices[i])
-        return up_price, down_price
-
-    def _get_ref_price(self, market: dict, event: dict, asset: str) -> float | None:
-        import re
-        desc = market.get("description") or ""
-        patterns = [r'\$([0-9,]+\.?[0-9]*)', r'([0-9,]+\.?[0-9]*)\s*USD']
-        for pat in patterns:
-            matches = re.findall(pat, desc)
-            for match in matches:
-                val = float(match.replace(",", ""))
-                if asset == "bitcoin" and 10000 < val < 500000:
-                    return val
-                elif asset == "ethereum" and 100 < val < 50000:
-                    return val
-        return None
-
-    def _parse_json(self, val):
-        if val is None:
-            return None
-        if isinstance(val, (list, dict)):
-            return val
-        try:
-            return json.loads(val)
-        except Exception:
-            return None
-
-    def _parse_dt(self, s: str):
-        if not s:
-            return None
-        try:
-            s = s.replace("Z", "+00:00")
-            dt = datetime.fromisoformat(s)
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
-            return dt
-        except Exception:
-            return None
-
-    def get_markets(self):
-        with self._lock:
-            return list(self.active_markets)
+    logger.info(
+        f"✅ Signal: {best_side} score={best_score} delta={delta*100:.3f}% "
+        f"ref=${ref_price:,.0f} now=${current_price:,.0f} "
+        f"@ {entry_price:.2f} T-{seconds_left:.0f}s"
+    )
+    return result
 
 
-_scanner = MarketScanner()
-
-def start_scanner():
-    _scanner.start()
-
-def get_scanner():
-    return _scanner
+def kelly_size(balance: float, win_rate: float, confidence: str) -> float:
+    from config import MAX_POSITION_PCT, MAX_POSITION_PCT_KELLY, MIN_TRADE_USD
+    if balance <= 0 or balance > 100000:
+        return MIN_TRADE_USD
+    if win_rate < 0.52:
+        win_rate = 0.55
+    kelly_f = win_rate - (1 - win_rate)
+    kelly_f = max(0.02, min(kelly_f, 0.5))
+    multiplier = 1.5 if confidence == "HIGH" else 1.0
+    size = balance * MAX_POSITION_PCT * kelly_f * multiplier
+    size = min(size, balance * MAX_POSITION_PCT_KELLY)
+    size = min(size, 25.0)
+    size = max(size, MIN_TRADE_USD)
+    return round(size, 2)
