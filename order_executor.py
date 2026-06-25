@@ -1,7 +1,7 @@
 """
 Real order executor — only used when PAPER_TRADING=false
 Uses LIMIT order with 3% slippage tolerance.
-Cancels immediately if not filled.
+Leaves order open for 55s — Polymarket cancels automatically at market close.
 """
 import logging
 import time
@@ -40,7 +40,8 @@ def place_order(token_id: str, price: float, size: float, side: str = "BUY",
                 alt_token_id: str = None) -> dict:
     """
     Place LIMIT order with 3% slippage tolerance.
-    If not filled in 2s, cancel immediately.
+    Leaves order open for 55s max — Polymarket cancels at close if not filled.
+    No risk of buying at wrong price since limit is enforced by the exchange.
     """
     client = get_client()
     if not client:
@@ -50,8 +51,6 @@ def place_order(token_id: str, price: float, size: float, side: str = "BUY",
         logger.warning(f"Scanner price {price:.2f} out of range — skipping")
         return {"error": f"scanner price out of range: {price:.2f}"}
 
-    # Add 3% slippage tolerance to increase fill probability
-    # but never above MAX_PRICE
     limit_price = round(min(price * 1.03, MAX_PRICE), 2)
     shares = round(size / price, 2)
 
@@ -76,13 +75,14 @@ def place_order(token_id: str, price: float, size: float, side: str = "BUY",
             return resp
 
         if status == "live" and order_id:
-            logger.info(f"Order live, waiting 2s then cancelling...")
-            time.sleep(20)
+            # Wait 55s — market will auto-cancel if not filled at close
+            logger.info(f"Order live — waiting up to 55s for fill...")
+            time.sleep(55)
             try:
                 cancel_resp = client.cancel_order(OrderPayload(orderID=order_id))
-                logger.info(f"Order cancelled: {cancel_resp}")
+                logger.info(f"Order cancelled after timeout: {cancel_resp}")
             except Exception as ce:
-                logger.warning(f"Cancel failed: {ce}")
+                logger.warning(f"Cancel failed (may already be filled or expired): {ce}")
             return {"error": "limit not filled, cancelled"}
 
         return {"error": f"unexpected status: {status}"}
