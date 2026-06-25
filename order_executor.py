@@ -79,7 +79,8 @@ def place_order(token_id: str, price: float, size: float, side: str = "BUY",
             logger.info(f"Order live, waiting 2s then cancelling...")
             time.sleep(0.5)
             try:
-                cancel_resp = client.cancel_order(order_id)
+                from py_clob_client_v2.clob_types import OrderPayload
+                cancel_resp = client.cancel_order(OrderPayload(orderID=order_id))
                 logger.info(f"Order cancelled: {cancel_resp}")
             except Exception as ce:
                 logger.warning(f"Cancel failed: {ce}")
