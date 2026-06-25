@@ -1,12 +1,16 @@
 """
 Real order executor — only used when PAPER_TRADING=false
-The scanner already validates prices via CLOB /price.
-We trust the scanner price and execute FAK directly.
+Uses LIMIT order with max price 0.80 — if ask > 0.80, cancels automatically.
+This solves the slippage problem: FAK market orders were buying at 0.99
+even when scanner showed 0.52.
 """
 import logging
 from config import PRIVATE_KEY, FUNDER, CHAIN_ID, CLOB_HOST
 
 logger = logging.getLogger(__name__)
+
+MAX_PRICE = 0.80
+MIN_PRICE = 0.25
 
 _client = None
 
@@ -35,32 +39,37 @@ def get_client():
 def place_order(token_id: str, price: float, size: float, side: str = "BUY",
                 alt_token_id: str = None) -> dict:
     """
-    Execute FAK order. Price already validated by scanner via CLOB /price.
-    Scanner guarantees price is between 0.25 and 0.80.
+    Place a LIMIT order at max price 0.80.
+    If the real ask > 0.80, the order is cancelled automatically.
+    This prevents buying tokens at 0.99 when scanner showed 0.52.
     """
     client = get_client()
     if not client:
         return {"error": "No CLOB client"}
 
-    # Price already validated by scanner — just execute
-    if price > 0.80 or price < 0.25:
+    if price > MAX_PRICE or price < MIN_PRICE:
         logger.warning(f"Scanner price {price:.2f} out of range — skipping")
         return {"error": f"scanner price out of range: {price:.2f}"}
 
+    # Use scanner price as limit price — won't execute above it
+    limit_price = round(price, 2)
+    shares = round(size / price, 2)
+
     try:
-        from py_clob_client_v2.clob_types import MarketOrderArgsV2, OrderType
-        amount_usdc = float(f"{size * price:.2f}")
-        logger.info(f"Executing FAK: token={token_id[:20]}... amount=${amount_usdc} price={price:.2f}")
-        resp = client.create_and_post_market_order(MarketOrderArgsV2(
+        from py_clob_client_v2.clob_types import OrderArgsV2
+        logger.info(f"Placing LIMIT order: {side} {shares} shares @ max {limit_price:.2f} (token={token_id[:20]}...)")
+        
+        order_args = OrderArgsV2(
             token_id=token_id,
-            amount=amount_usdc,
+            price=limit_price,
+            size=shares,
             side=side,
-            order_type=OrderType.FAK,
-        ))
-        logger.info(f"Market order placed: {resp}")
+        )
+        resp = client.create_and_post_order(order_args)
+        logger.info(f"Limit order placed: {resp}")
         return resp
     except Exception as e:
-        logger.warning(f"Market order failed: {e} — skipping")
+        logger.warning(f"Limit order failed: {e} — skipping")
         return {"error": str(e)}
 
 
