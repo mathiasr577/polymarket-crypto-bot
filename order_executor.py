@@ -1,6 +1,7 @@
 """
 Real order executor — only used when PAPER_TRADING=false
 Validates with CLOB /price and /book before executing FAK.
+Auto-detects if token IDs are swapped.
 """
 import logging
 import requests
@@ -46,16 +47,16 @@ def _clob_get(path, params, timeout=2.0):
 def get_buy_price(token_id: str) -> Decimal | None:
     try:
         data = _clob_get("/price", {"token_id": token_id, "side": "BUY"})
-        return Decimal(str(data["price"]))
+        price = Decimal(str(data["price"]))
+        return price if price > 0 else None
     except Exception as e:
         logger.debug(f"CLOB /price error: {e}")
         return None
 
 
-def liquidity_ok(token_id: str, amount_usdc: float) -> tuple[bool, str, Decimal | None]:
+def liquidity_ok(token_id: str, amount_usdc: float) -> tuple:
     amount = Decimal(str(round(amount_usdc, 2)))
 
-    # Step 1: /price BUY — fuente principal
     buy_price = get_buy_price(token_id)
     if buy_price is None:
         return False, "no CLOB buy price", None
@@ -63,7 +64,6 @@ def liquidity_ok(token_id: str, amount_usdc: float) -> tuple[bool, str, Decimal 
     if buy_price < MIN_PRICE or buy_price > MAX_PRICE:
         return False, f"buy price out of range: {buy_price}", buy_price
 
-    # Step 2: /book para profundidad
     try:
         book = _clob_get("/book", {"token_id": token_id})
         asks = book.get("asks", [])
@@ -92,29 +92,45 @@ def liquidity_ok(token_id: str, amount_usdc: float) -> tuple[bool, str, Decimal 
                 avg_price = weighted_cost / total_shares
                 return True, f"liquidity ok avg={avg_price:.4f}", avg_price
 
-        # Si /book no tiene suficiente pero /price existe y amount <= $5, dejar pasar
         if amount <= Decimal("5"):
             return True, f"book thin, using /price fallback: {buy_price}", buy_price
 
-        return False, "not enough ask liquidity under max price", buy_price
+        return False, "not enough ask liquidity", buy_price
 
     except Exception as e:
-        # /book falló pero /price está bien — permitir trade pequeño
         if amount <= Decimal("5"):
             return True, f"book failed, /price fallback: {buy_price}", buy_price
-        return False, f"book failed, amount too large: {e}", buy_price
+        return False, f"book failed: {e}", buy_price
 
 
-def place_order(token_id: str, price: float, size: float, side: str = "BUY") -> dict:
+def place_order(token_id: str, price: float, size: float, side: str = "BUY",
+                alt_token_id: str = None) -> dict:
+    """
+    Place FAK order. If token_id price is out of range but alt_token_id
+    is in range, use alt_token_id instead (handles swapped token IDs).
+    """
     client = get_client()
     if not client:
         return {"error": "No CLOB client"}
 
     amount_usdc = round(size * price, 2)
 
+    # Try primary token
     ok, reason, real_price = liquidity_ok(token_id, amount_usdc)
+
+    # If primary token is out of range and we have an alt token, try it
+    if not ok and alt_token_id and "out of range" in reason:
+        logger.warning(f"Primary token out of range ({reason}), trying alt token")
+        ok_alt, reason_alt, real_price_alt = liquidity_ok(alt_token_id, amount_usdc)
+        if ok_alt:
+            logger.info(f"Using alt token — {reason_alt}")
+            token_id = alt_token_id
+            ok = ok_alt
+            reason = reason_alt
+            real_price = real_price_alt
+
     if not ok:
-        logger.warning(f"SKIP {token_id[:20]}...: {reason}")
+        logger.warning(f"SKIP: {reason}")
         return {"error": reason}
 
     logger.info(f"EXECUTE: {reason}")

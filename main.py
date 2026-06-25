@@ -116,10 +116,8 @@ def trading_loop():
 
 
 def _tick(scanner, feed, paper, live):
-    # Always run paper trading
     resolve_expired(paper)
 
-    # Live trading checks
     if live:
         resolve_live_expired(live)
         if live.get_stats()["done"]:
@@ -188,7 +186,7 @@ def _tick(scanner, feed, paper, live):
                     indicators=indicators,
                 )
 
-        # Live trade (unlimited)
+        # Live trade
         if live and market_id not in live_open and live.can_trade():
             live_asset_open = [p for p in live.open_positions.values() if p.get("asset") == asset]
             if not live_asset_open:
@@ -202,6 +200,7 @@ def _tick(scanner, feed, paper, live):
                     token_id=token_id,
                     reasons=signal["reasons"],
                     indicators=indicators,
+                    tokens=market["tokens"],  # pass all tokens for alt fallback
                 )
 
 

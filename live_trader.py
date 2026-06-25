@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 logger = logging.getLogger(__name__)
 
 MAX_LIVE_TRADES = 999
-TRADE_SIZE = 5.0  # $5 de capital por trade
+TRADE_SIZE = 5.0
 
 class LiveTrader:
     def __init__(self):
@@ -49,7 +49,7 @@ class LiveTrader:
             return 0.0
 
     def open_trade(self, market_id, title, asset, side, price, token_id,
-                   reasons, indicators) -> bool:
+                   reasons, indicators, tokens=None) -> bool:
         with self._lock:
             if self.total_trades >= MAX_LIVE_TRADES:
                 return False
@@ -65,18 +65,26 @@ class LiveTrader:
             t0 = time.time()
 
             from order_executor import place_order
-            # shares = capital / price so we spend exactly TRADE_SIZE
+
             shares = round(TRADE_SIZE / price, 2)
+
+            # Pass the alt token (opposite side) so executor can try it
+            # if the primary token IDs are swapped
+            alt_token_id = None
+            if tokens:
+                alt_side = "DOWN" if side == "UP" else "UP"
+                alt_token_id = tokens.get(alt_side)
+
             resp = place_order(
                 token_id=token_id,
                 price=round(price, 2),
                 size=shares,
-                side="BUY"
+                side="BUY",
+                alt_token_id=alt_token_id,
             )
 
             latency = time.time() - t0
 
-            # Mark as attempted regardless of outcome
             with self._lock:
                 self.attempted_markets.add(market_id)
 
@@ -84,7 +92,6 @@ class LiveTrader:
                 logger.error(f"Order failed: {resp['error']}")
                 return False
 
-            # If not matched = no liquidity, skip
             status = resp.get("status", "")
             if status != "matched":
                 logger.warning(f"Order not matched (status={status}) — skipping")
