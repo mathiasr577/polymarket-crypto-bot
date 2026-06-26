@@ -129,6 +129,11 @@ def _tick(scanner, feed, paper, live):
                 f"WinRate={stats['win_rate']:.1f}%"
             )
 
+    # Only trade during market hours: 9AM-6PM ET (1PM-10PM UTC)
+    hour_utc = datetime.now(timezone.utc).hour
+    if not (config.TRADING_START_UTC <= hour_utc < config.TRADING_END_UTC):
+        return
+
     markets = scanner.get_markets()
     if not markets:
         return
@@ -168,7 +173,7 @@ def _tick(scanner, feed, paper, live):
         entry_price = signal["entry_price"]
         confidence = signal["confidence"]
 
-        # Paper trade (always)
+        # Paper trade (always, regardless of hours)
         if market_id not in paper_open:
             paper_asset_open = [p for p in paper.open_positions.values() if p.get("asset") == asset]
             if not paper_asset_open:
@@ -186,7 +191,7 @@ def _tick(scanner, feed, paper, live):
                     indicators=indicators,
                 )
 
-        # Live trade
+        # Live trade — only during trading hours
         if live and market_id not in live_open and live.can_trade():
             live_asset_open = [p for p in live.open_positions.values() if p.get("asset") == asset]
             if not live_asset_open:
@@ -200,7 +205,7 @@ def _tick(scanner, feed, paper, live):
                     token_id=token_id,
                     reasons=signal["reasons"],
                     indicators=indicators,
-                    tokens=market["tokens"],  # pass all tokens for alt fallback
+                    tokens=market["tokens"],
                 )
 
 
