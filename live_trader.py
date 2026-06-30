@@ -59,6 +59,11 @@ class LiveTrader:
                 return False
             if len(self.open_positions) >= 2:
                 return False
+            # Mark as attempted IMMEDIATELY — before placing the order.
+            # This prevents the trading loop (runs every 10s) from
+            # re-attempting the same market while a limit order is
+            # still waiting up to 55s to fill or get cancelled.
+            self.attempted_markets.add(market_id)
 
         try:
             import time
@@ -68,8 +73,6 @@ class LiveTrader:
 
             shares = round(TRADE_SIZE / price, 2)
 
-            # Pass the alt token (opposite side) so executor can try it
-            # if the primary token IDs are swapped
             alt_token_id = None
             if tokens:
                 alt_side = "DOWN" if side == "UP" else "UP"
@@ -84,9 +87,6 @@ class LiveTrader:
             )
 
             latency = time.time() - t0
-
-            with self._lock:
-                self.attempted_markets.add(market_id)
 
             if "error" in resp:
                 logger.error(f"Order failed: {resp['error']}")
