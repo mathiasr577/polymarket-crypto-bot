@@ -1,6 +1,6 @@
 """
 Live trader — ejecuta órdenes reales en Polymarket.
-$5 por trade, market orders FAK solamente.
+$5 por trade, limit orders solamente.
 """
 import logging
 import threading
@@ -18,6 +18,7 @@ class LiveTrader:
         self.open_positions = {}
         self.results = []
         self.attempted_markets = set()
+        self.active_assets = set()  # assets with a pending order right now
         self._client = None
         self._init_client()
 
@@ -59,11 +60,13 @@ class LiveTrader:
                 return False
             if len(self.open_positions) >= 2:
                 return False
-            # Mark as attempted IMMEDIATELY — before placing the order.
-            # This prevents the trading loop (runs every 10s) from
-            # re-attempting the same market while a limit order is
-            # still waiting up to 55s to fill or get cancelled.
+            # Block if this asset already has a pending order
+            if asset in self.active_assets:
+                logger.info(f"Skipping {asset} — order already pending for this asset")
+                return False
+            # Mark immediately before releasing lock
             self.attempted_markets.add(market_id)
+            self.active_assets.add(asset)
 
         try:
             import time
@@ -87,6 +90,10 @@ class LiveTrader:
             )
 
             latency = time.time() - t0
+
+            # Always release active_assets when done, regardless of outcome
+            with self._lock:
+                self.active_assets.discard(asset)
 
             if "error" in resp:
                 logger.error(f"Order failed: {resp['error']}")
@@ -122,6 +129,8 @@ class LiveTrader:
             return True
 
         except Exception as e:
+            with self._lock:
+                self.active_assets.discard(asset)
             logger.error(f"Live trade error: {e}")
             return False
 
