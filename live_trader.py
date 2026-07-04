@@ -18,7 +18,7 @@ class LiveTrader:
         self.open_positions = {}
         self.results = []
         self.attempted_markets = set()
-        self.active_assets = set()  # assets with a pending order right now
+        self.active_assets = set()
         self._client = None
         self._init_client()
 
@@ -60,11 +60,9 @@ class LiveTrader:
                 return False
             if len(self.open_positions) >= 2:
                 return False
-            # Block if this asset already has a pending order
             if asset in self.active_assets:
                 logger.info(f"Skipping {asset} — order already pending for this asset")
                 return False
-            # Mark immediately before releasing lock
             self.attempted_markets.add(market_id)
             self.active_assets.add(asset)
 
@@ -74,24 +72,22 @@ class LiveTrader:
 
             from order_executor import place_order
 
-            shares = round(TRADE_SIZE / price, 2)
-
             alt_token_id = None
             if tokens:
                 alt_side = "DOWN" if side == "UP" else "UP"
                 alt_token_id = tokens.get(alt_side)
 
+            # Pass TRADE_SIZE in dollars — order_executor handles shares calculation
             resp = place_order(
                 token_id=token_id,
                 price=round(price, 2),
-                size=shares,
+                size=TRADE_SIZE,
                 side="BUY",
                 alt_token_id=alt_token_id,
             )
 
             latency = time.time() - t0
 
-            # Always release active_assets when done, regardless of outcome
             with self._lock:
                 self.active_assets.discard(asset)
 

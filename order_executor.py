@@ -40,8 +40,8 @@ def place_order(token_id: str, price: float, size: float, side: str = "BUY",
                 alt_token_id: str = None) -> dict:
     """
     Place LIMIT order with 3% slippage tolerance.
+    size = dollars to spend (e.g. 5.0 = $5)
     Leaves order open for 55s max — Polymarket cancels at close if not filled.
-    No risk of buying at wrong price since limit is enforced by the exchange.
     """
     client = get_client()
     if not client:
@@ -52,11 +52,12 @@ def place_order(token_id: str, price: float, size: float, side: str = "BUY",
         return {"error": f"scanner price out of range: {price:.2f}"}
 
     limit_price = round(min(price * 1.03, MAX_PRICE), 2)
+    # size is dollars, convert to shares
     shares = round(size / price, 2)
 
     try:
         from py_clob_client_v2.clob_types import OrderArgsV2, OrderPayload
-        logger.info(f"LIMIT order: BUY {shares} shares @ {limit_price:.2f} (scanner={price:.2f}, token={token_id[:20]}...)")
+        logger.info(f"LIMIT order: BUY {shares} shares @ {limit_price:.2f} (${size:.2f}, scanner={price:.2f}, token={token_id[:20]}...)")
 
         order_args = OrderArgsV2(
             token_id=token_id,
@@ -75,7 +76,6 @@ def place_order(token_id: str, price: float, size: float, side: str = "BUY",
             return resp
 
         if status == "live" and order_id:
-            # Wait 55s — market will auto-cancel if not filled at close
             logger.info(f"Order live — waiting up to 55s for fill...")
             time.sleep(55)
             try:
