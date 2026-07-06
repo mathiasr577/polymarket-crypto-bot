@@ -91,11 +91,11 @@ def generate_signal(indicators: dict, market: dict) -> dict:
     up_price = market.get("up_price", 0.5)
     down_price = market.get("down_price", 0.5)
 
-    # Filtro de precio: solo entre 0.25 y 0.80
+    # Filtro de precio
     if votes["UP"] >= votes["DOWN"]:
-        if up_price > 0.80:
+        if up_price > 0.60:  # UP caro no paga suficiente — historicamente pierde
             result["blocked"] = True
-            result["block_reason"] = f"UP token too expensive: {up_price:.2f}"
+            result["block_reason"] = f"UP token too expensive: {up_price:.2f} (max 0.60)"
             return result
         if up_price < 0.25:
             result["blocked"] = True
