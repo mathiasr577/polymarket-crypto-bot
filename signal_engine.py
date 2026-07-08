@@ -1,14 +1,15 @@
 """
 Estrategia basada en delta del precio vs precio de referencia del mercado.
 Entra a T-60s antes del cierre cuando hay señal clara.
+Solo entra con delta >= 0.15% — señales fuertes únicamente.
 """
 import logging
 
 logger = logging.getLogger(__name__)
 
-DELTA_STRONG = 0.0015   # 0.15% → señal fuerte
-DELTA_MEDIUM = 0.0008   # 0.08% → señal media
-ENTRY_WINDOW_START = 60  # Entrar entre T-60s y T-10s
+DELTA_STRONG = 0.0020   # 0.20% → señal muy fuerte
+DELTA_MEDIUM = 0.0015   # 0.15% → señal mínima aceptable
+ENTRY_WINDOW_START = 60
 ENTRY_WINDOW_END = 10
 
 def generate_signal(indicators: dict, market: dict) -> dict:
@@ -91,9 +92,8 @@ def generate_signal(indicators: dict, market: dict) -> dict:
     up_price = market.get("up_price", 0.5)
     down_price = market.get("down_price", 0.5)
 
-    # Filtro de precio
     if votes["UP"] >= votes["DOWN"]:
-        if up_price > 0.60:  # UP caro no paga suficiente — historicamente pierde
+        if up_price > 0.60:
             result["blocked"] = True
             result["block_reason"] = f"UP token too expensive: {up_price:.2f} (max 0.60)"
             return result
