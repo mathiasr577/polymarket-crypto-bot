@@ -1,20 +1,20 @@
 """
 Estrategia basada en delta del precio vs precio de referencia del mercado.
 - Ventana de entrada: T-45s a T-8s
-- Rango de precio ideal: 0.38 a 0.58 para ambos lados
-- Solo señales fuertes: delta >= 0.15%
+- Rango de precio: 0.38 a 0.58 para ambos lados
+- Delta mínimo: 0.08%
 """
 import logging
 
 logger = logging.getLogger(__name__)
 
-DELTA_STRONG = 0.0020   # 0.20% → señal muy fuerte
-DELTA_MEDIUM = 0.0015   # 0.15% → señal mínima aceptable
-ENTRY_WINDOW_START = 45  # Entrar entre T-45s y T-8s
+DELTA_STRONG = 0.0015   # 0.15% → señal fuerte
+DELTA_MEDIUM = 0.0008   # 0.08% → señal mínima aceptable
+ENTRY_WINDOW_START = 45
 ENTRY_WINDOW_END = 8
 
-MIN_PRICE = 0.38  # token mínimo — por debajo no hay señal real
-MAX_PRICE = 0.58  # token máximo — por encima el payout no compensa
+MIN_PRICE = 0.38
+MAX_PRICE = 0.58
 
 def generate_signal(indicators: dict, market: dict) -> dict:
     result = {
@@ -99,7 +99,6 @@ def generate_signal(indicators: dict, market: dict) -> dict:
     best_side = "UP" if votes["UP"] >= votes["DOWN"] else "DOWN"
     token_price = up_price if best_side == "UP" else down_price
 
-    # Filtro de precio: rango 0.38-0.58 para ambos lados
     if token_price > MAX_PRICE:
         result["blocked"] = True
         result["block_reason"] = f"{best_side} token too expensive: {token_price:.2f} (max {MAX_PRICE})"
