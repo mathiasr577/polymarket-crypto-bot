@@ -1,7 +1,8 @@
 """
 Estrategia basada en delta del precio vs precio de referencia del mercado.
-Entra a T-60s antes del cierre cuando hay señal clara.
-Solo entra con delta >= 0.15% — señales fuertes únicamente.
+- Ventana de entrada: T-45s a T-8s
+- Rango de precio ideal: 0.38 a 0.58 para ambos lados
+- Solo señales fuertes: delta >= 0.15%
 """
 import logging
 
@@ -9,8 +10,11 @@ logger = logging.getLogger(__name__)
 
 DELTA_STRONG = 0.0020   # 0.20% → señal muy fuerte
 DELTA_MEDIUM = 0.0015   # 0.15% → señal mínima aceptable
-ENTRY_WINDOW_START = 60
-ENTRY_WINDOW_END = 10
+ENTRY_WINDOW_START = 45  # Entrar entre T-45s y T-8s
+ENTRY_WINDOW_END = 8
+
+MIN_PRICE = 0.38  # token mínimo — por debajo no hay señal real
+MAX_PRICE = 0.58  # token máximo — por encima el payout no compensa
 
 def generate_signal(indicators: dict, market: dict) -> dict:
     result = {
@@ -33,7 +37,7 @@ def generate_signal(indicators: dict, market: dict) -> dict:
 
     if seconds_left > ENTRY_WINDOW_START:
         result["blocked"] = True
-        result["block_reason"] = f"Too early: {seconds_left:.0f}s left (wait until T-60s)"
+        result["block_reason"] = f"Too early: {seconds_left:.0f}s left (wait until T-45s)"
         return result
 
     if seconds_left < ENTRY_WINDOW_END:
@@ -92,26 +96,19 @@ def generate_signal(indicators: dict, market: dict) -> dict:
     up_price = market.get("up_price", 0.5)
     down_price = market.get("down_price", 0.5)
 
-    if votes["UP"] >= votes["DOWN"]:
-        if up_price > 0.60:
-            result["blocked"] = True
-            result["block_reason"] = f"UP token too expensive: {up_price:.2f} (max 0.60)"
-            return result
-        if up_price < 0.25:
-            result["blocked"] = True
-            result["block_reason"] = f"UP token no liquidity: {up_price:.2f}"
-            return result
-    else:
-        if down_price > 0.80:
-            result["blocked"] = True
-            result["block_reason"] = f"DOWN token too expensive: {down_price:.2f}"
-            return result
-        if down_price < 0.25:
-            result["blocked"] = True
-            result["block_reason"] = f"DOWN token no liquidity: {down_price:.2f}"
-            return result
-
     best_side = "UP" if votes["UP"] >= votes["DOWN"] else "DOWN"
+    token_price = up_price if best_side == "UP" else down_price
+
+    # Filtro de precio: rango 0.38-0.58 para ambos lados
+    if token_price > MAX_PRICE:
+        result["blocked"] = True
+        result["block_reason"] = f"{best_side} token too expensive: {token_price:.2f} (max {MAX_PRICE})"
+        return result
+    if token_price < MIN_PRICE:
+        result["blocked"] = True
+        result["block_reason"] = f"{best_side} token too cheap: {token_price:.2f} (min {MIN_PRICE})"
+        return result
+
     best_score = max(votes["UP"], votes["DOWN"])
 
     if best_score < 2:
@@ -120,7 +117,7 @@ def generate_signal(indicators: dict, market: dict) -> dict:
         return result
 
     token_id = market["tokens"].get(best_side)
-    entry_price = up_price if best_side == "UP" else down_price
+    entry_price = token_price
 
     result["side"] = best_side
     result["score"] = best_score
