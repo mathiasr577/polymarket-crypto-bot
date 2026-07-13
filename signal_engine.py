@@ -1,7 +1,7 @@
 """
 Estrategia basada en delta del precio vs precio de referencia del mercado.
 - Ventana de entrada: T-45s a T-8s
-- Rango de precio: 0.38 a 0.58 para ambos lados
+- Rango de precio: 0.38 a 0.65 para ambos lados
 - Delta mínimo: 0.08%
 """
 import logging
@@ -14,7 +14,7 @@ ENTRY_WINDOW_START = 45
 ENTRY_WINDOW_END = 8
 
 MIN_PRICE = 0.38
-MAX_PRICE = 0.58
+MAX_PRICE = 0.65
 
 def generate_signal(indicators: dict, market: dict) -> dict:
     result = {
