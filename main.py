@@ -15,15 +15,15 @@ import config
 from price_feed import start_feed, get_feed
 from market_scanner import start_scanner, get_scanner
 from signal_engine import generate_signal, kelly_size, ENTRY_WINDOW_START, ENTRY_WINDOW_END
-
-# Delta mínimo del activo correlacionado para contar como confirmación cruzada
-CROSS_ASSET_MIN_DELTA = 0.0003
 from paper_trader import get_trader
 from dashboard import create_dashboard
 
 # Live trader imports
 if not config.PAPER_TRADING:
     from live_trader import get_live_trader
+
+# Delta mínimo del activo correlacionado para contar como confirmación cruzada
+CROSS_ASSET_MIN_DELTA = 0.0003
 
 
 def resolve_expired(trader):
