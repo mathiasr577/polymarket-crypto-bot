@@ -10,6 +10,7 @@ logger = logging.getLogger(__name__)
 
 MAX_LIVE_TRADES = 999
 TRADE_SIZE = 5.0
+MAX_NO_FILLS_HISTORY = 20
 
 class LiveTrader:
     def __init__(self):
@@ -19,6 +20,9 @@ class LiveTrader:
         self.results = []
         self.attempted_markets = set()
         self.active_assets = set()
+        self.no_fill_count = 0
+        self.blocked_count = 0
+        self.recent_no_fills = []  # últimos intentos sin liquidez
         self._client = None
         self._init_client()
 
@@ -40,6 +44,11 @@ class LiveTrader:
                 self.total_trades < MAX_LIVE_TRADES and
                 len(self.open_positions) < 2
             )
+
+    def record_blocked(self):
+        """Llamar cuando una señal es bloqueada por precio/delta."""
+        with self._lock:
+            self.blocked_count += 1
 
     def get_balance(self) -> float:
         try:
@@ -77,7 +86,6 @@ class LiveTrader:
                 alt_side = "DOWN" if side == "UP" else "UP"
                 alt_token_id = tokens.get(alt_side)
 
-            # Pass TRADE_SIZE in dollars — order_executor handles shares calculation
             resp = place_order(
                 token_id=token_id,
                 price=round(price, 2),
@@ -92,12 +100,17 @@ class LiveTrader:
                 self.active_assets.discard(asset)
 
             if "error" in resp:
-                logger.error(f"Order failed: {resp['error']}")
+                error_msg = resp["error"]
+                logger.error(f"Order failed: {error_msg}")
+                # Si es un no-fill (límite no llenado), registrarlo
+                if "not filled" in error_msg or "cancelled" in error_msg:
+                    self._record_no_fill(asset, side, price)
                 return False
 
             status = resp.get("status", "")
             if status != "matched":
                 logger.warning(f"Order not matched (status={status}) — skipping")
+                self._record_no_fill(asset, side, price)
                 return False
 
             with self._lock:
@@ -130,6 +143,21 @@ class LiveTrader:
             logger.error(f"Live trade error: {e}")
             return False
 
+    def _record_no_fill(self, asset, side, price):
+        """Registra un intento sin liquidez."""
+        with self._lock:
+            self.no_fill_count += 1
+            entry = {
+                "asset": asset,
+                "side": side,
+                "price": price,
+                "time": datetime.now(timezone.utc).strftime("%H:%M UTC"),
+            }
+            self.recent_no_fills.insert(0, entry)
+            # Mantener solo los últimos N
+            if len(self.recent_no_fills) > MAX_NO_FILLS_HISTORY:
+                self.recent_no_fills = self.recent_no_fills[:MAX_NO_FILLS_HISTORY]
+
     def resolve_trade(self, market_id: str, outcome: str):
         with self._lock:
             trade = self.open_positions.pop(market_id, None)
@@ -153,19 +181,52 @@ class LiveTrader:
     def get_stats(self) -> dict:
         with self._lock:
             wins = [r for r in self.results if r["win"]]
+            losses = [r for r in self.results if not r["win"]]
             total_pnl = sum(r["pnl"] for r in self.results)
+            best = max((r["pnl"] for r in self.results), default=0)
+            worst = min((r["pnl"] for r in self.results), default=0)
+
+            # Cash balance real del CLOB
+            cash_balance = 0.0
+            try:
+                from order_executor import get_balance
+                cash_balance = get_balance()
+            except Exception:
+                pass
+
+            # By asset stats
+            by_asset = {}
+            for r in self.results:
+                a = r.get("asset", "unknown")
+                if a not in by_asset:
+                    by_asset[a] = {"total": 0, "wins": 0}
+                by_asset[a]["total"] += 1
+                if r["win"]:
+                    by_asset[a]["wins"] += 1
+
             return {
                 "total_trades": self.total_trades,
                 "completed": len(self.results),
                 "wins": len(wins),
-                "losses": len(self.results) - len(wins),
+                "losses": len(losses),
                 "win_rate": len(wins) / len(self.results) * 100 if self.results else 0,
                 "total_pnl": total_pnl,
+                "pnl": total_pnl,
+                "roi": (total_pnl / (len(self.results) * TRADE_SIZE) * 100) if self.results else 0,
+                "best_trade": best,
+                "worst_trade": worst,
                 "open_count": len(self.open_positions),
                 "open_positions": list(self.open_positions.values()),
                 "results": self.results,
+                "recent_trades": list(reversed(self.results[-10:])),
                 "max_trades": MAX_LIVE_TRADES,
                 "done": self.total_trades >= MAX_LIVE_TRADES,
+                "cash_balance": cash_balance,
+                "no_fill_count": self.no_fill_count,
+                "blocked_count": self.blocked_count,
+                "recent_no_fills": list(self.recent_no_fills[:10]),
+                "by_asset": by_asset,
+                "balance": cash_balance,
             }
 
 
