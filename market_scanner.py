@@ -5,8 +5,14 @@ import json
 import threading
 from datetime import datetime, timezone
 from config import GAMMA_API, SCAN_INTERVAL
+from signal_engine import ENTRY_WINDOW_START
 
 logger = logging.getLogger(__name__)
+
+# Ventana en la que se pide el precio BUY real del order book en vez de
+# confiar en outcomePrices de Gamma (que puede estar stale). Debe cubrir al
+# menos toda la ventana de entrada del signal_engine, con margen.
+LIVE_PRICE_WINDOW = ENTRY_WINDOW_START + 20
 
 ASSETS = {
     "btc": "bitcoin",
@@ -38,9 +44,9 @@ class MarketScanner:
             except Exception as e:
                 logger.error(f"MarketScanner error: {e}")
             
-            # Dynamic interval: 2s when any market is within 90s, else 30s
+            # Dynamic interval: 2s when any market is inside the entry window, else 30s
             markets = self.active_markets
-            near_close = any(0 < m.get("seconds_left", 999) < 90 for m in markets)
+            near_close = any(0 < m.get("seconds_left", 999) < LIVE_PRICE_WINDOW for m in markets)
             interval = 2 if near_close else 30
             time.sleep(interval)
 
@@ -137,7 +143,7 @@ class MarketScanner:
                 return None
 
             # For markets close to entry window, get REAL prices from CLOB /price
-            if -30 < seconds_left < 120:
+            if -30 < seconds_left < LIVE_PRICE_WINDOW:
                 up_price = self._get_clob_buy_price(tokens["UP"])
                 down_price = self._get_clob_buy_price(tokens["DOWN"])
                 if up_price is None or down_price is None:

@@ -13,6 +13,9 @@ from config import PRICE_INTERVAL
 
 logger = logging.getLogger(__name__)
 
+VOL_LOOKBACK_SAMPLES = 20   # ~10 min de historia a PRICE_INTERVAL=30s
+MIN_VOL_SAMPLES = 6
+
 class PriceFeed:
     def __init__(self, maxlen=200):
         self.prices = {
@@ -151,6 +154,29 @@ class PriceFeed:
             "ref_price": ref_price,
             "price_count": len(prices),
         }
+
+    def get_volatility_per_sqrt_sec(self, asset: str) -> float | None:
+        """Volatilidad realizada de retornos log, normalizada por sqrt(segundo).
+
+        Se usa para convertir un delta de precio crudo en un z-score ajustado
+        por el tiempo restante hasta el cierre del mercado.
+        """
+        with self._lock:
+            prices = list(self.prices[asset])[-VOL_LOOKBACK_SAMPLES:]
+
+        if len(prices) < MIN_VOL_SAMPLES:
+            return None
+
+        arr = np.array(prices, dtype=float)
+        if np.any(arr <= 0):
+            return None
+
+        log_returns = np.diff(np.log(arr))
+        sigma_sample = float(np.std(log_returns, ddof=1))
+        if sigma_sample <= 0:
+            return None
+
+        return sigma_sample / (PRICE_INTERVAL ** 0.5)
 
     def _rsi(self, arr, period=6):
         if len(arr) < period + 1:

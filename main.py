@@ -14,7 +14,10 @@ logger = logging.getLogger(__name__)
 import config
 from price_feed import start_feed, get_feed
 from market_scanner import start_scanner, get_scanner
-from signal_engine import generate_signal, kelly_size
+from signal_engine import generate_signal, kelly_size, ENTRY_WINDOW_START, ENTRY_WINDOW_END
+
+# Delta mínimo del activo correlacionado para contar como confirmación cruzada
+CROSS_ASSET_MIN_DELTA = 0.0003
 from paper_trader import get_trader
 from dashboard import create_dashboard
 
@@ -115,6 +118,28 @@ def trading_loop():
         time.sleep(10)
 
 
+def _cross_asset_confirm(feed, asset: str) -> str | None:
+    """BTC y ETH suelen moverse juntos en ventanas de 5 min. Si el otro
+    activo también se está moviendo en una dirección clara en su ventana
+    actual, devuelve esa dirección como confirmación barata."""
+    other = "ethereum" if asset == "bitcoin" else "bitcoin"
+    other_ind = feed.get_indicators(other)
+    other_ref = feed.get_current_window_ref(other)
+    if not other_ind or not other_ref:
+        return None
+
+    other_price = other_ind.get("price")
+    if not other_price:
+        return None
+
+    other_delta = (other_price - other_ref) / other_ref
+    if other_delta >= CROSS_ASSET_MIN_DELTA:
+        return "UP"
+    if other_delta <= -CROSS_ASSET_MIN_DELTA:
+        return "DOWN"
+    return None
+
+
 def _tick(scanner, feed, paper, live):
     resolve_expired(paper)
 
@@ -147,7 +172,7 @@ def _tick(scanner, feed, paper, live):
             continue
 
         seconds_left = market.get("seconds_left", 300)
-        if seconds_left > 65 or seconds_left < 8:
+        if seconds_left > ENTRY_WINDOW_START or seconds_left < ENTRY_WINDOW_END:
             continue
 
         asset = market["asset"]
@@ -162,6 +187,9 @@ def _tick(scanner, feed, paper, live):
 
         if not market.get("ref_price"):
             continue
+
+        indicators["vol_per_sqrt_sec"] = feed.get_volatility_per_sqrt_sec(asset)
+        indicators["cross_asset_confirm"] = _cross_asset_confirm(feed, asset)
 
         signal = generate_signal(indicators, market)
         if signal["blocked"]:

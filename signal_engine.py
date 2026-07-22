@@ -1,20 +1,52 @@
 """
-Estrategia basada en delta del precio vs precio de referencia del mercado.
-- Ventana de entrada: T-45s a T-8s
-- Rango de precio: 0.38 a 0.65 para ambos lados
-- Delta mínimo: 0.08%
+Estrategia: modelo de probabilidad ajustado por tiempo y volatilidad realizada.
+
+En vez de un delta fijo + banda de precio fija, esto estima P(gana) con una
+aproximación de movimiento browniano:
+
+    z = delta_acumulado / (sigma_realizada * sqrt(tiempo_restante))
+    p_modelo = CDF_normal(z)
+
+y opera cuando esa probabilidad supera el breakeven implícito por el precio
+del token (ajustado por el fee del 7%) más un margen de seguridad. Esto
+reemplaza la banda de precio fija (que rechazaba señales fuertes por caras Y
+señales tempranas por no tener delta suficiente) por un filtro de edge que
+funciona a cualquier precio dentro de los límites de liquidez/ejecución.
+
+- Ventana de entrada: T-180s a T-8s (antes T-45s a T-8s)
+- Rango de precio: 0.25 a 0.80 (límites de ejecución, no el filtro real)
+- Filtro real: p_modelo >= breakeven(precio) + EDGE_MARGIN
 """
+import math
 import logging
 
 logger = logging.getLogger(__name__)
 
-DELTA_STRONG = 0.0015   # 0.15% → señal fuerte
-DELTA_MEDIUM = 0.0008   # 0.08% → señal mínima aceptable
-ENTRY_WINDOW_START = 45
+ENTRY_WINDOW_START = 180
 ENTRY_WINDOW_END = 8
 
-MIN_PRICE = 0.38
-MAX_PRICE = 0.65
+MIN_PRICE = 0.25
+MAX_PRICE = 0.80
+
+PLATFORM_FEE = 0.07
+EDGE_MARGIN = 0.06          # puntos de probabilidad exigidos por encima del breakeven
+MIN_MODEL_PROB = 0.55       # piso absoluto: nunca operar si el modelo apenas roza 50/50,
+                             # aunque el precio barato haga que el breakeven sea aún más bajo
+                             # (el modelo es una aproximación gaussiana con pocas muestras de
+                             # volatilidad — este piso evita operar ruido solo porque las
+                             # cuotas son generosas)
+MOMENTUM_BONUS = 0.02
+CROSS_ASSET_BONUS = 0.015
+
+
+def _norm_cdf(z: float) -> float:
+    return 0.5 * (1 + math.erf(z / math.sqrt(2)))
+
+
+def _breakeven(price: float) -> float:
+    """Probabilidad de ganar necesaria para EV=0 a este precio, neto del fee."""
+    return price / (price + (1 - PLATFORM_FEE) * (1 - price))
+
 
 def generate_signal(indicators: dict, market: dict) -> dict:
     result = {
@@ -26,6 +58,7 @@ def generate_signal(indicators: dict, market: dict) -> dict:
         "block_reason": "",
         "token_id": None,
         "entry_price": None,
+        "model_prob": None,
     }
 
     if indicators is None:
@@ -37,7 +70,7 @@ def generate_signal(indicators: dict, market: dict) -> dict:
 
     if seconds_left > ENTRY_WINDOW_START:
         result["blocked"] = True
-        result["block_reason"] = f"Too early: {seconds_left:.0f}s left (wait until T-45s)"
+        result["block_reason"] = f"Too early: {seconds_left:.0f}s left (wait until T-{ENTRY_WINDOW_START}s)"
         return result
 
     if seconds_left < ENTRY_WINDOW_END:
@@ -54,49 +87,40 @@ def generate_signal(indicators: dict, market: dict) -> dict:
         return result
 
     delta = (current_price - ref_price) / ref_price
-    abs_delta = abs(delta)
 
-    votes = {"UP": 0, "DOWN": 0}
-    reasons = {"UP": [], "DOWN": []}
-
-    if abs_delta >= DELTA_STRONG:
-        if delta > 0:
-            votes["UP"] += 3
-            reasons["UP"].append(f"Price +{delta*100:.3f}% above ref ${ref_price:,.0f} → UP locked")
-        else:
-            votes["DOWN"] += 3
-            reasons["DOWN"].append(f"Price {delta*100:.3f}% below ref ${ref_price:,.0f} → DOWN locked")
-    elif abs_delta >= DELTA_MEDIUM:
-        if delta > 0:
-            votes["UP"] += 2
-            reasons["UP"].append(f"Price +{delta*100:.3f}% above ref → leaning UP")
-        else:
-            votes["DOWN"] += 2
-            reasons["DOWN"].append(f"Price {delta*100:.3f}% below ref → leaning DOWN")
-    else:
+    sigma = indicators.get("vol_per_sqrt_sec")
+    if not sigma or sigma <= 0:
         result["blocked"] = True
-        result["block_reason"] = f"Delta too small: {delta*100:.4f}% (need ±{DELTA_MEDIUM*100:.2f}%)"
+        result["block_reason"] = "Not enough volatility data yet"
         return result
 
-    momentum = indicators.get("momentum", "neutral")
-    pct_2min = indicators.get("pct_2min", 0)
+    sigma_remaining = sigma * math.sqrt(max(seconds_left, 1))
+    z = delta / sigma_remaining
+    p_up = _norm_cdf(z)
 
-    if momentum == "up" and pct_2min > 0 and delta > 0:
-        votes["UP"] += 1
-        reasons["UP"].append(f"Momentum confirms UP (+{pct_2min*100:.3f}%)")
-    elif momentum == "down" and pct_2min < 0 and delta < 0:
-        votes["DOWN"] += 1
-        reasons["DOWN"].append(f"Momentum confirms DOWN ({pct_2min*100:.3f}%)")
-    elif (momentum == "up" and delta < 0) or (momentum == "down" and delta > 0):
-        if votes["UP"] > 0:
-            votes["UP"] = max(0, votes["UP"] - 1)
-        if votes["DOWN"] > 0:
-            votes["DOWN"] = max(0, votes["DOWN"] - 1)
+    best_side = "UP" if p_up >= 0.5 else "DOWN"
+    p_model = p_up if best_side == "UP" else (1 - p_up)
+
+    reasons = [
+        f"z={z:+.2f} delta={delta*100:+.3f}% sigma_rem={sigma_remaining*100:.3f}% "
+        f"-> model P({best_side})={p_model*100:.1f}%"
+    ]
+
+    momentum = indicators.get("momentum", "neutral")
+    if (momentum == "up" and best_side == "UP") or (momentum == "down" and best_side == "DOWN"):
+        p_model = min(0.97, p_model + MOMENTUM_BONUS)
+        reasons.append(f"Momentum confirms {best_side} (+{MOMENTUM_BONUS*100:.1f}pp)")
+    elif (momentum == "up" and best_side == "DOWN") or (momentum == "down" and best_side == "UP"):
+        p_model = max(0.5, p_model - MOMENTUM_BONUS)
+        reasons.append(f"Momentum contradicts {best_side} (-{MOMENTUM_BONUS*100:.1f}pp)")
+
+    cross_confirm = indicators.get("cross_asset_confirm")
+    if cross_confirm == best_side:
+        p_model = min(0.97, p_model + CROSS_ASSET_BONUS)
+        reasons.append(f"Other asset also leans {best_side} (+{CROSS_ASSET_BONUS*100:.1f}pp)")
 
     up_price = market.get("up_price", 0.5)
     down_price = market.get("down_price", 0.5)
-
-    best_side = "UP" if votes["UP"] >= votes["DOWN"] else "DOWN"
     token_price = up_price if best_side == "UP" else down_price
 
     if token_price > MAX_PRICE:
@@ -108,27 +132,32 @@ def generate_signal(indicators: dict, market: dict) -> dict:
         result["block_reason"] = f"{best_side} token too cheap: {token_price:.2f} (min {MIN_PRICE})"
         return result
 
-    best_score = max(votes["UP"], votes["DOWN"])
+    breakeven = _breakeven(token_price)
+    required = max(breakeven + EDGE_MARGIN, MIN_MODEL_PROB)
 
-    if best_score < 2:
+    if p_model < required:
         result["blocked"] = True
-        result["block_reason"] = f"Signal too weak: score={best_score}"
+        result["block_reason"] = (
+            f"Edge insufficient: model={p_model*100:.1f}% "
+            f"breakeven={breakeven*100:.1f}% need={required*100:.1f}%"
+        )
         return result
 
+    edge = p_model - breakeven
     token_id = market["tokens"].get(best_side)
-    entry_price = token_price
 
     result["side"] = best_side
-    result["score"] = best_score
-    result["confidence"] = "HIGH" if best_score >= 3 else "MEDIUM"
-    result["reasons"] = reasons[best_side]
+    result["score"] = round(edge * 100, 2)
+    result["confidence"] = "HIGH" if edge >= 2 * EDGE_MARGIN else "MEDIUM"
+    result["reasons"] = reasons
     result["token_id"] = token_id
-    result["entry_price"] = entry_price
+    result["entry_price"] = token_price
+    result["model_prob"] = p_model
 
     logger.info(
-        f"✅ Signal: {best_side} score={best_score} delta={delta*100:.3f}% "
-        f"ref=${ref_price:,.0f} now=${current_price:,.0f} "
-        f"@ {entry_price:.2f} T-{seconds_left:.0f}s"
+        f"✅ Signal: {best_side} model={p_model*100:.1f}% breakeven={breakeven*100:.1f}% "
+        f"edge={edge*100:.1f}pp @ {token_price:.2f} T-{seconds_left:.0f}s "
+        f"ref=${ref_price:,.0f} now=${current_price:,.0f}"
     )
     return result
 
