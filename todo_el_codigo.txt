@@ -1,0 +1,673 @@
+# ============================================================
+# FILE: signal_engine.py
+# ============================================================
+
+"""
+Estrategia: modelo de probabilidad ajustado por tiempo y volatilidad realizada.
+
+En vez de un delta fijo + banda de precio fija, esto estima P(gana) con una
+aproximación de movimiento browniano:
+
+    z = delta_acumulado / (sigma_realizada * sqrt(tiempo_restante))
+    p_modelo = CDF_normal(z)
+
+y opera cuando esa probabilidad supera el breakeven implícito por el precio
+del token (ajustado por el fee del 7%) más un margen de seguridad. Esto
+reemplaza la banda de precio fija (que rechazaba señales fuertes por caras Y
+señales tempranas por no tener delta suficiente) por un filtro de edge que
+funciona a cualquier precio dentro de los límites de liquidez/ejecución.
+
+- Ventana de entrada: T-180s a T-8s (antes T-45s a T-8s)
+- Rango de precio: 0.25 a 0.80 (límites de ejecución, no el filtro real)
+- Filtro real: p_modelo >= breakeven(precio) + EDGE_MARGIN
+"""
+import math
+import logging
+
+logger = logging.getLogger(__name__)
+
+ENTRY_WINDOW_START = 180
+ENTRY_WINDOW_END = 8
+
+MIN_PRICE = 0.25
+MAX_PRICE = 0.80
+
+PLATFORM_FEE = 0.07
+EDGE_MARGIN = 0.06          # puntos de probabilidad exigidos por encima del breakeven
+MIN_MODEL_PROB = 0.55       # piso absoluto: nunca operar si el modelo apenas roza 50/50,
+                             # aunque el precio barato haga que el breakeven sea aún más bajo
+                             # (el modelo es una aproximación gaussiana con pocas muestras de
+                             # volatilidad — este piso evita operar ruido solo porque las
+                             # cuotas son generosas)
+MOMENTUM_BONUS = 0.02
+CROSS_ASSET_BONUS = 0.015
+
+
+def _norm_cdf(z: float) -> float:
+    return 0.5 * (1 + math.erf(z / math.sqrt(2)))
+
+
+def _breakeven(price: float) -> float:
+    """Probabilidad de ganar necesaria para EV=0 a este precio, neto del fee."""
+    return price / (price + (1 - PLATFORM_FEE) * (1 - price))
+
+
+def generate_signal(indicators: dict, market: dict) -> dict:
+    result = {
+        "side": None,
+        "confidence": None,
+        "score": 0,
+        "reasons": [],
+        "blocked": False,
+        "block_reason": "",
+        "token_id": None,
+        "entry_price": None,
+        "model_prob": None,
+    }
+
+    if indicators is None:
+        result["blocked"] = True
+        result["block_reason"] = "No indicators yet"
+        return result
+
+    seconds_left = market.get("seconds_left", 300)
+
+    if seconds_left > ENTRY_WINDOW_START:
+        result["blocked"] = True
+        result["block_reason"] = f"Too early: {seconds_left:.0f}s left (wait until T-{ENTRY_WINDOW_START}s)"
+        return result
+
+    if seconds_left < ENTRY_WINDOW_END:
+        result["blocked"] = True
+        result["block_reason"] = f"Too late: {seconds_left:.0f}s left"
+        return result
+
+    current_price = indicators.get("price")
+    ref_price = market.get("ref_price")
+
+    if not current_price or not ref_price or ref_price == 0:
+        result["blocked"] = True
+        result["block_reason"] = "No reference price available"
+        return result
+
+    delta = (current_price - ref_price) / ref_price
+
+    sigma = indicators.get("vol_per_sqrt_sec")
+    if not sigma or sigma <= 0:
+        result["blocked"] = True
+        result["block_reason"] = "Not enough volatility data yet"
+        return result
+
+    sigma_remaining = sigma * math.sqrt(max(seconds_left, 1))
+    z = delta / sigma_remaining
+    p_up = _norm_cdf(z)
+
+    best_side = "UP" if p_up >= 0.5 else "DOWN"
+    p_model = p_up if best_side == "UP" else (1 - p_up)
+
+    reasons = [
+        f"z={z:+.2f} delta={delta*100:+.3f}% sigma_rem={sigma_remaining*100:.3f}% "
+        f"-> model P({best_side})={p_model*100:.1f}%"
+    ]
+
+    momentum = indicators.get("momentum", "neutral")
+    if (momentum == "up" and best_side == "UP") or (momentum == "down" and best_side == "DOWN"):
+        p_model = min(0.97, p_model + MOMENTUM_BONUS)
+        reasons.append(f"Momentum confirms {best_side} (+{MOMENTUM_BONUS*100:.1f}pp)")
+    elif (momentum == "up" and best_side == "DOWN") or (momentum == "down" and best_side == "UP"):
+        p_model = max(0.5, p_model - MOMENTUM_BONUS)
+        reasons.append(f"Momentum contradicts {best_side} (-{MOMENTUM_BONUS*100:.1f}pp)")
+
+    cross_confirm = indicators.get("cross_asset_confirm")
+    if cross_confirm == best_side:
+        p_model = min(0.97, p_model + CROSS_ASSET_BONUS)
+        reasons.append(f"Other asset also leans {best_side} (+{CROSS_ASSET_BONUS*100:.1f}pp)")
+
+    up_price = market.get("up_price", 0.5)
+    down_price = market.get("down_price", 0.5)
+    token_price = up_price if best_side == "UP" else down_price
+
+    if token_price > MAX_PRICE:
+        result["blocked"] = True
+        result["block_reason"] = f"{best_side} token too expensive: {token_price:.2f} (max {MAX_PRICE})"
+        return result
+    if token_price < MIN_PRICE:
+        result["blocked"] = True
+        result["block_reason"] = f"{best_side} token too cheap: {token_price:.2f} (min {MIN_PRICE})"
+        return result
+
+    breakeven = _breakeven(token_price)
+    required = max(breakeven + EDGE_MARGIN, MIN_MODEL_PROB)
+
+    if p_model < required:
+        result["blocked"] = True
+        result["block_reason"] = (
+            f"Edge insufficient: model={p_model*100:.1f}% "
+            f"breakeven={breakeven*100:.1f}% need={required*100:.1f}%"
+        )
+        return result
+
+    edge = p_model - breakeven
+    token_id = market["tokens"].get(best_side)
+
+    result["side"] = best_side
+    result["score"] = round(edge * 100, 2)
+    result["confidence"] = "HIGH" if edge >= 2 * EDGE_MARGIN else "MEDIUM"
+    result["reasons"] = reasons
+    result["token_id"] = token_id
+    result["entry_price"] = token_price
+    result["model_prob"] = p_model
+
+    logger.info(
+        f"✅ Signal: {best_side} model={p_model*100:.1f}% breakeven={breakeven*100:.1f}% "
+        f"edge={edge*100:.1f}pp @ {token_price:.2f} T-{seconds_left:.0f}s "
+        f"ref=${ref_price:,.0f} now=${current_price:,.0f}"
+    )
+    return result
+
+
+def kelly_size(balance: float, win_rate: float, confidence: str) -> float:
+    from config import MAX_POSITION_PCT, MAX_POSITION_PCT_KELLY, MIN_TRADE_USD
+    if balance <= 0 or balance > 100000:
+        return MIN_TRADE_USD
+    if win_rate < 0.52:
+        win_rate = 0.55
+    kelly_f = win_rate - (1 - win_rate)
+    kelly_f = max(0.02, min(kelly_f, 0.5))
+    multiplier = 1.5 if confidence == "HIGH" else 1.0
+    size = balance * MAX_POSITION_PCT * kelly_f * multiplier
+    size = min(size, balance * MAX_POSITION_PCT_KELLY)
+    size = min(size, 25.0)
+    size = max(size, MIN_TRADE_USD)
+    return round(size, 2)
+
+
+# ============================================================
+# FILE: price_feed.py
+# ============================================================
+
+"""
+Price feed con ref_price tracking.
+Guarda el precio al inicio de cada ventana de 5 minutos (múltiplo de 300s).
+Ese es el precio de referencia que usa Polymarket para resolver el mercado.
+"""
+import time
+import threading
+import requests
+import logging
+from collections import deque
+import numpy as np
+from config import PRICE_INTERVAL
+
+logger = logging.getLogger(__name__)
+
+VOL_LOOKBACK_SAMPLES = 20   # ~10 min de historia a PRICE_INTERVAL=30s
+MIN_VOL_SAMPLES = 6
+
+class PriceFeed:
+    def __init__(self, maxlen=200):
+        self.prices = {
+            "bitcoin": deque(maxlen=maxlen),
+            "ethereum": deque(maxlen=maxlen),
+        }
+        self.timestamps = {
+            "bitcoin": deque(maxlen=maxlen),
+            "ethereum": deque(maxlen=maxlen),
+        }
+        # Precio al inicio de cada ventana de 5 minutos
+        # key: window_ts (múltiplo de 300), value: price
+        self.window_ref_prices = {
+            "bitcoin": {},
+            "ethereum": {},
+        }
+        self._lock = threading.Lock()
+        self._running = False
+        self._thread = None
+
+    def start(self):
+        self._running = True
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread.start()
+        logger.info("PriceFeed started")
+
+    def stop(self):
+        self._running = False
+
+    def _loop(self):
+        while self._running:
+            try:
+                self._fetch()
+            except Exception as e:
+                logger.error(f"PriceFeed error: {e}")
+            time.sleep(PRICE_INTERVAL)
+
+    def _fetch(self):
+        r = requests.get(
+            "https://api.kraken.com/0/public/Ticker",
+            params={"pair": "XBTUSD,ETHUSD"},
+            timeout=10
+        )
+        r.raise_for_status()
+        data = r.json().get("result", {})
+        btc = float(list(data.get("XXBTZUSD", {}).get("c", [0]))[0])
+        eth = float(list(data.get("XETHZUSD", {}).get("c", [0]))[0])
+        now = time.time()
+
+        # Calcular ventana actual
+        window_ts = int(now // 300) * 300
+
+        with self._lock:
+            if btc > 0:
+                self.prices["bitcoin"].append(btc)
+                self.timestamps["bitcoin"].append(now)
+                # Guardar precio de referencia si es el primero de esta ventana
+                if window_ts not in self.window_ref_prices["bitcoin"]:
+                    self.window_ref_prices["bitcoin"][window_ts] = btc
+                    logger.info(f"BTC ref price for window {window_ts}: ${btc:,.2f}")
+                # Limpiar ventanas viejas (más de 30 minutos)
+                old = [k for k in self.window_ref_prices["bitcoin"] if k < window_ts - 1800]
+                for k in old:
+                    del self.window_ref_prices["bitcoin"][k]
+
+            if eth > 0:
+                self.prices["ethereum"].append(eth)
+                self.timestamps["ethereum"].append(now)
+                if window_ts not in self.window_ref_prices["ethereum"]:
+                    self.window_ref_prices["ethereum"][window_ts] = eth
+                    logger.info(f"ETH ref price for window {window_ts}: ${eth:,.2f}")
+                old = [k for k in self.window_ref_prices["ethereum"] if k < window_ts - 1800]
+                for k in old:
+                    del self.window_ref_prices["ethereum"][k]
+
+        logger.debug(f"BTC=${btc:,.2f} ETH=${eth:,.2f} window={window_ts}")
+
+    def get_ref_price(self, asset: str, window_ts: int) -> float | None:
+        """Obtener precio de referencia para una ventana específica."""
+        with self._lock:
+            return self.window_ref_prices[asset].get(window_ts)
+
+    def get_current_window_ref(self, asset: str) -> float | None:
+        """Precio de referencia de la ventana actual."""
+        window_ts = int(time.time() // 300) * 300
+        with self._lock:
+            return self.window_ref_prices[asset].get(window_ts)
+
+    def get_latest(self, asset: str) -> float | None:
+        with self._lock:
+            if not self.prices[asset]:
+                return None
+            return self.prices[asset][-1]
+
+    def get_indicators(self, asset: str) -> dict | None:
+        with self._lock:
+            prices = list(self.prices[asset])
+
+        if len(prices) < 4:
+            return None
+
+        arr = np.array(prices, dtype=float)
+
+        # Momentum últimos 3 precios (~90s)
+        recent = arr[-4:]
+        changes = np.diff(recent)
+        if all(c > 0 for c in changes):
+            momentum = "up"
+        elif all(c < 0 for c in changes):
+            momentum = "down"
+        else:
+            momentum = "neutral"
+
+        # % cambio últimos 2 min (~4 muestras)
+        n = min(4, len(arr))
+        pct_2min = (arr[-1] - arr[-n]) / arr[-n] if arr[-n] != 0 else 0
+
+        # Volatilidad
+        n_vol = min(10, len(arr))
+        vol = abs(arr[-1] - arr[-n_vol]) / arr[-n_vol] if arr[-n_vol] != 0 else 0
+
+        # RSI rápido (6 períodos)
+        rsi = self._rsi(arr, 6) if len(arr) >= 7 else 50.0
+
+        # Ref price de la ventana actual
+        window_ts = int(time.time() // 300) * 300
+        with self._lock:
+            ref_price = self.window_ref_prices[asset].get(window_ts)
+
+        return {
+            "price": float(arr[-1]),
+            "momentum": momentum,
+            "pct_2min": float(pct_2min),
+            "volatility": float(vol),
+            "rsi": float(rsi),
+            "ref_price": ref_price,
+            "price_count": len(prices),
+        }
+
+    def get_volatility_per_sqrt_sec(self, asset: str) -> float | None:
+        """Volatilidad realizada de retornos log, normalizada por sqrt(segundo).
+
+        Se usa para convertir un delta de precio crudo en un z-score ajustado
+        por el tiempo restante hasta el cierre del mercado.
+        """
+        with self._lock:
+            prices = list(self.prices[asset])[-VOL_LOOKBACK_SAMPLES:]
+
+        if len(prices) < MIN_VOL_SAMPLES:
+            return None
+
+        arr = np.array(prices, dtype=float)
+        if np.any(arr <= 0):
+            return None
+
+        log_returns = np.diff(np.log(arr))
+        sigma_sample = float(np.std(log_returns, ddof=1))
+        if sigma_sample <= 0:
+            return None
+
+        return sigma_sample / (PRICE_INTERVAL ** 0.5)
+
+    def _rsi(self, arr, period=6):
+        if len(arr) < period + 1:
+            return 50.0
+        deltas = np.diff(arr)[-period:]
+        gains = np.where(deltas > 0, deltas, 0).mean()
+        losses = np.where(deltas < 0, -deltas, 0).mean()
+        if losses == 0:
+            return 100.0
+        rs = gains / losses
+        return 100 - (100 / (1 + rs))
+
+
+_feed = PriceFeed()
+
+def start_feed():
+    _feed.start()
+
+def get_feed():
+    return _feed
+
+
+# ============================================================
+# FILE: main.py
+# ============================================================
+
+import logging
+import threading
+import time
+import requests
+import json
+from datetime import datetime, timezone
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
+logger = logging.getLogger(__name__)
+
+import config
+from price_feed import start_feed, get_feed
+from market_scanner import start_scanner, get_scanner
+from signal_engine import generate_signal, kelly_size, ENTRY_WINDOW_START, ENTRY_WINDOW_END
+from paper_trader import get_trader
+from dashboard import create_dashboard
+
+# Live trader imports
+if not config.PAPER_TRADING:
+    from live_trader import get_live_trader
+
+# Delta mínimo del activo correlacionado para contar como confirmación cruzada
+CROSS_ASSET_MIN_DELTA = 0.0003
+
+
+def resolve_expired(trader):
+    open_positions = list(trader.open_positions.values())
+    if not open_positions:
+        return
+    for pos in open_positions:
+        market_id = pos["market_id"]
+        try:
+            r = requests.get(f"{config.GAMMA_API}/markets/{market_id}", timeout=8)
+            if r.status_code != 200:
+                continue
+            m = r.json()
+            if not (m.get("closed") or m.get("resolved")):
+                continue
+            outcome = _determine_outcome(m)
+            if outcome:
+                trader.resolve_trade(market_id, outcome)
+                logger.info(f"Resolved {market_id}: {outcome}")
+        except Exception as e:
+            logger.debug(f"Resolve error {market_id}: {e}")
+
+
+def resolve_live_expired(live_trader):
+    open_positions = list(live_trader.open_positions.values())
+    if not open_positions:
+        return
+    for pos in open_positions:
+        market_id = pos["market_id"]
+        try:
+            r = requests.get(f"{config.GAMMA_API}/markets/{market_id}", timeout=8)
+            if r.status_code != 200:
+                continue
+            m = r.json()
+            if not (m.get("closed") or m.get("resolved")):
+                continue
+            outcome = _determine_outcome(m)
+            if outcome:
+                live_trader.resolve_trade(market_id, outcome)
+        except Exception as e:
+            logger.debug(f"Live resolve error {market_id}: {e}")
+
+
+def _determine_outcome(m: dict) -> str | None:
+    outcomes = m.get("outcomes")
+    if isinstance(outcomes, str):
+        try:
+            outcomes = json.loads(outcomes)
+        except Exception:
+            return None
+
+    resolved = m.get("resolvedOutcome") or m.get("resolved_outcome")
+    if resolved is not None:
+        try:
+            idx = int(resolved)
+            if outcomes and idx < len(outcomes):
+                return outcomes[idx].strip().upper()
+        except Exception:
+            pass
+
+    outcome_prices = m.get("outcomePrices")
+    if isinstance(outcome_prices, str):
+        try:
+            outcome_prices = json.loads(outcome_prices)
+        except Exception:
+            return None
+
+    if outcome_prices and outcomes:
+        for i, price in enumerate(outcome_prices):
+            try:
+                if float(price) >= 0.99 and i < len(outcomes):
+                    return outcomes[i].strip().upper()
+            except Exception:
+                pass
+    return None
+
+
+def trading_loop():
+    scanner = get_scanner()
+    feed = get_feed()
+    paper = get_trader()
+    live = get_live_trader() if not config.PAPER_TRADING else None
+
+    logger.info(f"Trading loop started — mode: {'LIVE' if live else 'PAPER'} — warming up 60s...")
+    time.sleep(60)
+
+    while True:
+        try:
+            _tick(scanner, feed, paper, live)
+        except Exception as e:
+            logger.error(f"Tick error: {e}")
+        time.sleep(10)
+
+
+def _cross_asset_confirm(feed, asset: str) -> str | None:
+    """BTC y ETH suelen moverse juntos en ventanas de 5 min. Si el otro
+    activo también se está moviendo en una dirección clara en su ventana
+    actual, devuelve esa dirección como confirmación barata."""
+    other = "ethereum" if asset == "bitcoin" else "bitcoin"
+    other_ind = feed.get_indicators(other)
+    other_ref = feed.get_current_window_ref(other)
+    if not other_ind or not other_ref:
+        return None
+
+    other_price = other_ind.get("price")
+    if not other_price:
+        return None
+
+    other_delta = (other_price - other_ref) / other_ref
+    if other_delta >= CROSS_ASSET_MIN_DELTA:
+        return "UP"
+    if other_delta <= -CROSS_ASSET_MIN_DELTA:
+        return "DOWN"
+    return None
+
+
+def _tick(scanner, feed, paper, live):
+    resolve_expired(paper)
+
+    if live:
+        resolve_live_expired(live)
+        if live.get_stats()["done"]:
+            stats = live.get_stats()
+            logger.info(
+                f"🏁 LIVE TEST COMPLETE: "
+                f"{stats['wins']}/{stats['completed']} wins | "
+                f"PnL={stats['total_pnl']:+.2f} | "
+                f"WinRate={stats['win_rate']:.1f}%"
+            )
+
+    # Only trade during market hours: 9AM-6PM ET (1PM-10PM UTC)
+    hour_utc = datetime.now(timezone.utc).hour
+    if not (config.TRADING_START_UTC <= hour_utc < config.TRADING_END_UTC):
+        return
+
+    markets = scanner.get_markets()
+    if not markets:
+        return
+
+    paper_open = set(paper.open_positions.keys())
+    live_open = set(live.open_positions.keys()) if live else set()
+
+    for market in markets:
+        market_id = market["id"]
+        if not market_id:
+            continue
+
+        seconds_left = market.get("seconds_left", 300)
+        if seconds_left > ENTRY_WINDOW_START or seconds_left < ENTRY_WINDOW_END:
+            continue
+
+        asset = market["asset"]
+
+        indicators = feed.get_indicators(asset)
+        if indicators is None:
+            continue
+
+        ref_from_feed = feed.get_current_window_ref(asset)
+        if ref_from_feed:
+            market["ref_price"] = ref_from_feed
+
+        if not market.get("ref_price"):
+            continue
+
+        indicators["vol_per_sqrt_sec"] = feed.get_volatility_per_sqrt_sec(asset)
+        indicators["cross_asset_confirm"] = _cross_asset_confirm(feed, asset)
+
+        signal = generate_signal(indicators, market)
+        if signal["blocked"]:
+            logger.info(f"Blocked [{asset.upper()} T-{seconds_left:.0f}s]: {signal['block_reason']}")
+            continue
+
+        side = signal["side"]
+        token_id = signal["token_id"]
+        entry_price = signal["entry_price"]
+        confidence = signal["confidence"]
+
+        # Paper trade (always, regardless of hours)
+        if market_id not in paper_open:
+            paper_asset_open = [p for p in paper.open_positions.values() if p.get("asset") == asset]
+            if not paper_asset_open:
+                win_rate = paper.get_win_rate(50)
+                size = kelly_size(paper.balance, win_rate, confidence)
+                paper.open_trade(
+                    market_id=str(market_id),
+                    title=market["title"],
+                    asset=asset,
+                    side=side,
+                    size=size,
+                    price=entry_price,
+                    confidence=confidence,
+                    reasons=signal["reasons"],
+                    indicators=indicators,
+                )
+
+        # Live trade — only during trading hours
+        if live and market_id not in live_open and live.can_trade():
+            live_asset_open = [p for p in live.open_positions.values() if p.get("asset") == asset]
+            if not live_asset_open:
+                logger.info(f"🔴 Attempting LIVE trade: {side} {asset.upper()} @ {entry_price:.2f}")
+                live.open_trade(
+                    market_id=str(market_id),
+                    title=market["title"],
+                    asset=asset,
+                    side=side,
+                    price=entry_price,
+                    token_id=token_id,
+                    reasons=signal["reasons"],
+                    indicators=indicators,
+                    tokens=market["tokens"],
+                )
+
+
+def get_prices_snapshot():
+    feed = get_feed()
+    result = {}
+    for asset in ["bitcoin", "ethereum"]:
+        result[asset] = feed.get_indicators(asset)
+    return result
+
+
+def get_combined_stats():
+    paper_stats = get_trader().get_stats()
+    if not config.PAPER_TRADING:
+        live_stats = get_live_trader().get_stats()
+        paper_stats["live"] = live_stats
+    return paper_stats
+
+
+def main():
+    mode_label = "🔴 LIVE TRADING" if not config.PAPER_TRADING else "📄 PAPER TRADING"
+    logger.info(f"Starting — mode: {mode_label}")
+
+    if not config.PAPER_TRADING:
+        logger.info("⚠️  LIVE TRADING ACTIVE — Real money will be used")
+
+    start_feed()
+    start_scanner()
+
+    t = threading.Thread(target=trading_loop, daemon=True)
+    t.start()
+
+    flask_app = create_dashboard(
+        get_stats_fn=get_combined_stats,
+        get_prices_fn=get_prices_snapshot,
+        get_markets_fn=get_scanner().get_markets,
+        mode=mode_label,
+    )
+
+    flask_app.run(host="0.0.0.0", port=config.PORT)
+
+
+if __name__ == "__main__":
+    main()
