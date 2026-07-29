@@ -13,24 +13,27 @@ reemplaza la banda de precio fija (que rechazaba señales fuertes por caras Y
 señales tempranas por no tener delta suficiente) por un filtro de edge que
 funciona a cualquier precio dentro de los límites de liquidez/ejecución.
 
-- Ventana de entrada: T-180s a T-8s (antes T-45s a T-8s)
-- Rango de precio: 0.25 a 0.80 (límites de ejecución, no el filtro real)
-- Filtro real: p_modelo >= breakeven(precio) + EDGE_MARGIN
+- Ventana de entrada: T-120s a T-8s (antes T-180s; calibrado con 3 días de
+  trading real: el bucket T-150/180s concentraba ~la mitad del volumen y
+  explicaba casi toda la pérdida neta del período)
+- Precio mínimo: 0.45 (antes 0.25; por debajo de 0.45 el win rate real fue
+  5-48%, muy por debajo del breakeven)
+- Filtro real: p_modelo >= max(breakeven(precio) + EDGE_MARGIN, MIN_MODEL_PROB)
 """
 import math
 import logging
 
 logger = logging.getLogger(__name__)
 
-ENTRY_WINDOW_START = 180
+ENTRY_WINDOW_START = 120
 ENTRY_WINDOW_END = 8
 
-MIN_PRICE = 0.25
+MIN_PRICE = 0.45
 MAX_PRICE = 0.80
 
 PLATFORM_FEE = 0.07
-EDGE_MARGIN = 0.06          # puntos de probabilidad exigidos por encima del breakeven
-MIN_MODEL_PROB = 0.55       # piso absoluto: nunca operar si el modelo apenas roza 50/50,
+EDGE_MARGIN = 0.10          # puntos de probabilidad exigidos por encima del breakeven
+MIN_MODEL_PROB = 0.62       # piso absoluto: nunca operar si el modelo apenas roza 50/50,
                              # aunque el precio barato haga que el breakeven sea aún más bajo
                              # (el modelo es una aproximación gaussiana con pocas muestras de
                              # volatilidad — este piso evita operar ruido solo porque las
