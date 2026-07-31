@@ -4,13 +4,20 @@ $5 por trade, limit orders solamente.
 """
 import logging
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
+
+from config import DRAWDOWN_LIMIT
 
 logger = logging.getLogger(__name__)
 
 MAX_LIVE_TRADES = 999
 TRADE_SIZE = 5.0
 MAX_NO_FILLS_HISTORY = 20
+
+# ET en verano (EDT) es UTC-4. Mismo offset fijo que usan TRADING_START_UTC/
+# TRADING_END_UTC en config.py — no es DST-aware, es consistente con el resto
+# del código.
+ET_OFFSET = timedelta(hours=-4)
 
 class LiveTrader:
     def __init__(self):
@@ -24,6 +31,10 @@ class LiveTrader:
         self.blocked_count = 0
         self.recent_no_fills = []  # últimos intentos sin liquidez
         self._client = None
+        self.day_start_balance = None
+        self.current_trading_day = None
+        self.today_pnl = 0.0
+        self._drawdown_paused = False
         self._init_client()
 
     def _init_client(self):
@@ -37,13 +48,41 @@ class LiveTrader:
         except Exception as e:
             logger.error(f"LiveTrader init error: {e}")
 
-    def can_trade(self) -> bool:
+    def _check_day_rollover(self):
+        """Reinicia el tracking de drawdown diario al cruzar la medianoche ET."""
+        today = (datetime.now(timezone.utc) + ET_OFFSET).date()
         with self._lock:
-            return (
-                self._client is not None and
-                self.total_trades < MAX_LIVE_TRADES and
-                len(self.open_positions) < 2
-            )
+            if self.current_trading_day == today:
+                return
+            self.current_trading_day = today
+            self.today_pnl = 0.0
+            self._drawdown_paused = False
+        balance = self.get_balance()
+        with self._lock:
+            self.day_start_balance = balance
+        logger.info(f"New trading day {today}: day_start_balance=${balance:.2f}")
+
+    def can_trade(self) -> bool:
+        self._check_day_rollover()
+        with self._lock:
+            if (
+                self._client is None or
+                self.total_trades >= MAX_LIVE_TRADES or
+                len(self.open_positions) >= 2
+            ):
+                return False
+            if self.day_start_balance and self.day_start_balance > 0:
+                drawdown = -self.today_pnl / self.day_start_balance
+                if drawdown >= DRAWDOWN_LIMIT:
+                    if not self._drawdown_paused:
+                        self._drawdown_paused = True
+                        logger.warning(
+                            f"Drawdown limit hit: -{drawdown*100:.1f}% of today's "
+                            f"start balance (${self.day_start_balance:.2f}) — "
+                            f"pausing new live trades until tomorrow"
+                        )
+                    return False
+            return True
 
     def record_blocked(self):
         """Llamar cuando una señal es bloqueada por precio/delta."""
@@ -172,6 +211,7 @@ class LiveTrader:
                 pnl = -TRADE_SIZE
             result = {**trade, "outcome": outcome, "win": win, "pnl": pnl}
             self.results.append(result)
+            self.today_pnl += pnl
             logger.info(
                 f"LIVE RESULT: {'WIN' if win else 'LOSS'} "
                 f"{side} {trade['asset'].upper()} | "
@@ -227,6 +267,9 @@ class LiveTrader:
                 "recent_no_fills": list(self.recent_no_fills[:10]),
                 "by_asset": by_asset,
                 "balance": cash_balance,
+                "today_pnl": self.today_pnl,
+                "day_start_balance": self.day_start_balance,
+                "drawdown_paused": self._drawdown_paused,
             }
 
 

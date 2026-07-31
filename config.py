@@ -18,7 +18,7 @@ MAX_POSITION_PCT = 0.05       # 5% base
 MAX_POSITION_PCT_KELLY = 0.10 # 10% max with Kelly
 MIN_TRADE_USD = 5.0
 MAX_SIMULTANEOUS = 5
-DRAWDOWN_LIMIT = 0.20         # pause at -20%
+DRAWDOWN_LIMIT = 0.25         # pause new live trades for the day at -25% of the day's starting balance
 TRADING_START_UTC = 13        # 9AM ET = 1PM UTC
 TRADING_END_UTC = 22          # 6PM ET = 10PM UTC
 MAX_VOLATILITY_PCT = 0.005    # 0.5%
