@@ -19,6 +19,22 @@ funciona a cualquier precio dentro de los límites de liquidez/ejecución.
 - Precio mínimo: 0.45 (antes 0.25; por debajo de 0.45 el win rate real fue
   5-48%, muy por debajo del breakeven)
 - Filtro real: p_modelo >= max(breakeven(precio) + EDGE_MARGIN, MIN_MODEL_PROB)
+
+El modelo browniano puro no tiene drift: asume que el precio futuro está
+centrado en el precio actual. Eso lo deja ciego a tendencias sostenidas
+(ej. una racha alcista de 15 min), sobre todo justo al abrir cada ventana
+de 5 min, cuando ref_price recién se resetea y el delta acumulado es ~0
+aunque la tendencia previa siga en curso. Para corregir esto, se estima
+un drift reciente (regresión de precio sobre los últimos ~12 min) y se
+suma como término adicional al z-score:
+
+    z = delta/(sigma*sqrt(t)) + DRIFT_WEIGHT * clip(drift*sqrt(t)/sigma, ±MAX_DRIFT_Z)
+
+DRIFT_WEIGHT y MAX_DRIFT_Z están para no confiar el 100% en esta señal:
+a diferencia de los demás parámetros de este archivo, este ajuste no se
+pudo validar contra trades reales (no hay historial de precio tick a tick
+en los exports de Polymarket, solo resultados de mercado) — son un punto
+de partida conservador, no un valor calibrado.
 """
 import math
 import logging
@@ -38,8 +54,11 @@ MIN_MODEL_PROB = 0.62       # piso absoluto: nunca operar si el modelo apenas ro
                              # (el modelo es una aproximación gaussiana con pocas muestras de
                              # volatilidad — este piso evita operar ruido solo porque las
                              # cuotas son generosas)
-MOMENTUM_BONUS = 0.02
 CROSS_ASSET_BONUS = 0.015
+
+DRIFT_WEIGHT = 0.5   # cuánto se confía el ajuste de tendencia (0=ignorar, 1=full)
+MAX_DRIFT_Z = 1.0    # tope al aporte del drift al z-score, para que no pueda
+                      # por sí solo voltear una señal fuerte en contra
 
 
 def _norm_cdf(z: float) -> float:
@@ -99,23 +118,24 @@ def generate_signal(indicators: dict, market: dict) -> dict:
 
     sigma_remaining = sigma * math.sqrt(max(seconds_left, 1))
     z = delta / sigma_remaining
+
+    drift_note = ""
+    drift = indicators.get("trend_drift_per_sec")
+    if drift is not None:
+        raw_drift_z = drift * math.sqrt(max(seconds_left, 1)) / sigma
+        drift_z = max(-MAX_DRIFT_Z, min(MAX_DRIFT_Z, raw_drift_z)) * DRIFT_WEIGHT
+        z += drift_z
+        drift_note = f" drift_z={drift_z:+.2f}"
+
     p_up = _norm_cdf(z)
 
     best_side = "UP" if p_up >= 0.5 else "DOWN"
     p_model = p_up if best_side == "UP" else (1 - p_up)
 
     reasons = [
-        f"z={z:+.2f} delta={delta*100:+.3f}% sigma_rem={sigma_remaining*100:.3f}% "
+        f"z={z:+.2f}{drift_note} delta={delta*100:+.3f}% sigma_rem={sigma_remaining*100:.3f}% "
         f"-> model P({best_side})={p_model*100:.1f}%"
     ]
-
-    momentum = indicators.get("momentum", "neutral")
-    if (momentum == "up" and best_side == "UP") or (momentum == "down" and best_side == "DOWN"):
-        p_model = min(0.97, p_model + MOMENTUM_BONUS)
-        reasons.append(f"Momentum confirms {best_side} (+{MOMENTUM_BONUS*100:.1f}pp)")
-    elif (momentum == "up" and best_side == "DOWN") or (momentum == "down" and best_side == "UP"):
-        p_model = max(0.5, p_model - MOMENTUM_BONUS)
-        reasons.append(f"Momentum contradicts {best_side} (-{MOMENTUM_BONUS*100:.1f}pp)")
 
     cross_confirm = indicators.get("cross_asset_confirm")
     if cross_confirm == best_side:

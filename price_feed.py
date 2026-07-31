@@ -15,6 +15,10 @@ logger = logging.getLogger(__name__)
 
 VOL_LOOKBACK_SAMPLES = 20   # ~10 min de historia a PRICE_INTERVAL=30s
 MIN_VOL_SAMPLES = 6
+EWMA_HALFLIFE_MINUTES = 4   # a los 4 min, una muestra pesa la mitad que la actual
+
+TREND_LOOKBACK_MINUTES = 12  # horizonte de la regresión de tendencia
+MIN_TREND_SAMPLES = 10
 
 class PriceFeed:
     def __init__(self, maxlen=200):
@@ -158,6 +162,12 @@ class PriceFeed:
     def get_volatility_per_sqrt_sec(self, asset: str) -> float | None:
         """Volatilidad realizada de retornos log, normalizada por sqrt(segundo).
 
+        Pondera los retornos con EWMA (estilo RiskMetrics) en vez de un
+        promedio uniforme sobre la ventana: una muestra ruidosa de hace 30s
+        pesa más que una de hace 10 min, así que el estimador reacciona más
+        rápido a cambios de régimen de volatilidad dentro de la misma
+        ventana de lookback.
+
         Se usa para convertir un delta de precio crudo en un z-score ajustado
         por el tiempo restante hasta el cierre del mercado.
         """
@@ -172,11 +182,52 @@ class PriceFeed:
             return None
 
         log_returns = np.diff(np.log(arr))
-        sigma_sample = float(np.std(log_returns, ddof=1))
-        if sigma_sample <= 0:
+        n = len(log_returns)
+        if n == 0:
             return None
 
+        halflife_samples = EWMA_HALFLIFE_MINUTES * 60 / PRICE_INTERVAL
+        decay = 0.5 ** (1 / halflife_samples)
+        # weights[i] corresponde a log_returns[i]; el más reciente (último
+        # índice) pesa 1, decayendo hacia atrás en el tiempo.
+        weights = decay ** np.arange(n - 1, -1, -1)
+        weights = weights / weights.sum()
+
+        variance = float(np.sum(weights * log_returns ** 2))
+        if variance <= 0:
+            return None
+
+        sigma_sample = float(np.sqrt(variance))
         return sigma_sample / (PRICE_INTERVAL ** 0.5)
+
+    def get_trend_drift_per_sec(self, asset: str) -> float | None:
+        """Pendiente de una regresión lineal de log(precio) vs tiempo sobre
+        los últimos TREND_LOOKBACK_MINUTES minutos. Devuelve el drift
+        estimado en retorno fraccional por segundo (positivo = tendencia
+        alcista, negativo = bajista).
+
+        Usa una regresión (no solo los dos extremos) para que un par de
+        muestras ruidosas en el borde de la ventana no dominen la estimación.
+        """
+        lookback_samples = int(TREND_LOOKBACK_MINUTES * 60 / PRICE_INTERVAL)
+        with self._lock:
+            prices = list(self.prices[asset])[-lookback_samples:]
+            timestamps = list(self.timestamps[asset])[-lookback_samples:]
+
+        if len(prices) < MIN_TREND_SAMPLES:
+            return None
+
+        arr = np.array(prices, dtype=float)
+        if np.any(arr <= 0):
+            return None
+
+        ts = np.array(timestamps, dtype=float)
+        t_rel = ts - ts[0]
+        if t_rel[-1] <= 0:
+            return None
+
+        slope, _ = np.polyfit(t_rel, np.log(arr), 1)
+        return float(slope)
 
     def _rsi(self, arr, period=6):
         if len(arr) < period + 1:
