@@ -81,21 +81,30 @@ def place_order(token_id: str, price: float, size: float, side: str = "BUY",
             try:
                 cancel_resp = client.cancel_order(OrderPayload(orderID=order_id))
                 logger.info(f"Order cancelled after timeout: {cancel_resp}")
-                return {"error": "limit not filled, cancelled"}
             except Exception as ce:
-                # El cancel puede fallar justamente PORQUE la orden ya se llenó
-                # mientras esperábamos — no hay forma de distinguir eso de un
-                # error genuino sin ver la respuesta real. Tratarlo como "no se
-                # llenó" (comportamiento anterior) arriesgaba dejar una posición
-                # real sin registrar y, peor, reintentar el mismo mercado y
-                # terminar con una posición duplicada. Se marca como estado
-                # desconocido en vez de asumir nada.
                 logger.error(
-                    f"⚠️ Cancel falló después del timeout para orden {order_id} — "
+                    f"⚠️ Cancel lanzó una excepción para orden {order_id} — "
                     f"estado de fill DESCONOCIDO (puede haberse llenado o no): {ce}. "
                     f"Revisar manualmente en Polymarket."
                 )
-                return {"error": "cancel failed, fill status unknown", "unknown_fill": True, "order_id": order_id}
+                return {"error": "cancel raised exception, fill status unknown", "unknown_fill": True, "order_id": order_id}
+
+            # cancel_order() NO lanza excepción cuando la orden ya se llenó —
+            # devuelve 200 OK con un cuerpo que dice explícitamente
+            # "order can't be found - already canceled or matched" dentro de
+            # not_canceled. Confirmado contra una respuesta real de producción
+            # (04 ago 2026) donde esto correspondía a una orden que SÍ se había
+            # llenado con plata real. Solo se confirma "no se llenó" cuando el
+            # order_id aparece explícitamente en "canceled".
+            canceled_ids = cancel_resp.get("canceled") if isinstance(cancel_resp, dict) else None
+            if canceled_ids and order_id in canceled_ids:
+                return {"error": "limit not filled, cancelled"}
+
+            logger.error(
+                f"⚠️ No se pudo confirmar la cancelación de la orden {order_id} — "
+                f"estado de fill DESCONOCIDO: {cancel_resp}. Revisar manualmente en Polymarket."
+            )
+            return {"error": "cancel not confirmed, fill status unknown", "unknown_fill": True, "order_id": order_id}
 
         return {"error": f"unexpected status: {status}"}
 
