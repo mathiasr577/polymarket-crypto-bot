@@ -4,6 +4,7 @@ $5 por trade, limit orders solamente.
 """
 import logging
 import threading
+import time
 from datetime import datetime, timezone, timedelta
 
 from config import DRAWDOWN_LIMIT
@@ -18,6 +19,32 @@ MAX_NO_FILLS_HISTORY = 20
 # TRADING_END_UTC en config.py — no es DST-aware, es consistente con el resto
 # del código.
 ET_OFFSET = timedelta(hours=-4)
+
+# El campo con el precio real de fill no está documentado en la respuesta de
+# py_clob_client_v2 — se prueban los nombres más comunes en orden y, si
+# ninguno aparece, se usa el precio de decisión (mismo comportamiento que
+# antes) dejando un warning en el log para poder confirmar el campo correcto
+# mirando una respuesta real en los logs de Railway.
+_FILL_PRICE_FIELDS = ("price", "avgPrice", "average_price", "averagePrice", "fillPrice", "fill_price")
+
+
+def _extract_fill_price(resp: dict, fallback: float) -> float:
+    for key in _FILL_PRICE_FIELDS:
+        val = resp.get(key)
+        if val is None:
+            continue
+        try:
+            fv = float(val)
+        except (TypeError, ValueError):
+            continue
+        if fv > 0:
+            return fv
+    logger.warning(
+        f"No pude identificar el precio real de fill en la respuesta de la orden "
+        f"(probé {_FILL_PRICE_FIELDS}) — uso el precio de decisión {fallback:.3f} "
+        f"como aproximación. Respuesta completa: {resp}"
+    )
+    return fallback
 
 class LiveTrader:
     def __init__(self):
@@ -118,6 +145,20 @@ class LiveTrader:
 
     def open_trade(self, market_id, title, asset, side, price, token_id,
                    reasons, indicators, tokens=None) -> bool:
+        """Reserva el mercado/activo de forma síncrona y lanza la ejecución
+        real en un hilo aparte.
+
+        place_order() puede quedar hasta 55s esperando el fill (ver
+        order_executor.py). Antes esto corría en el mismo hilo que el loop
+        principal de main.py, así que mientras BTC esperaba su fill, ETH no
+        podía ni evaluarse ni operarse en ese tick — se perdían señales
+        válidas del otro activo. Ahora la reserva (attempted_markets/
+        active_assets) sigue siendo inmediata y bajo lock, pero la llamada
+        de red que puede bloquear se ejecuta en un hilo daemon separado.
+
+        El valor de retorno ahora indica si se INICIÓ un intento, no si la
+        orden se llenó (eso se sabe recién cuando termina el hilo).
+        """
         with self._lock:
             if self.total_trades >= MAX_LIVE_TRADES:
                 return False
@@ -133,8 +174,20 @@ class LiveTrader:
             self.attempted_markets.add(market_id)
             self.active_assets.add(asset)
 
+        t = threading.Thread(
+            target=self._execute_order,
+            args=(market_id, title, asset, side, price, token_id, reasons, tokens),
+            daemon=True,
+        )
+        t.start()
+        return True
+
+    def _execute_order(self, market_id, title, asset, side, price, token_id, reasons, tokens):
+        """Corre en un hilo aparte — ver open_trade(). Libera active_assets
+        siempre, y libera attempted_markets solo si el intento falló (no
+        matched), para permitir un reintento del mismo mercado mientras
+        quede tiempo en su ventana de entrada."""
         try:
-            import time
             t0 = time.time()
 
             from order_executor import place_order
@@ -163,13 +216,19 @@ class LiveTrader:
                 # Si es un no-fill (límite no llenado), registrarlo
                 if "not filled" in error_msg or "cancelled" in error_msg:
                     self._record_no_fill(asset, side, price)
-                return False
+                with self._lock:
+                    self.attempted_markets.discard(market_id)
+                return
 
             status = resp.get("status", "")
             if status != "matched":
                 logger.warning(f"Order not matched (status={status}) — skipping")
                 self._record_no_fill(asset, side, price)
-                return False
+                with self._lock:
+                    self.attempted_markets.discard(market_id)
+                return
+
+            fill_price = _extract_fill_price(resp, fallback=price)
 
             with self._lock:
                 self.total_trades += 1
@@ -179,7 +238,8 @@ class LiveTrader:
                     "asset": asset,
                     "side": side,
                     "size": TRADE_SIZE,
-                    "price": price,
+                    "price": fill_price,
+                    "decision_price": price,
                     "token_id": token_id,
                     "reasons": reasons,
                     "opened_at": datetime.now(timezone.utc).isoformat(),
@@ -190,16 +250,15 @@ class LiveTrader:
 
             logger.info(
                 f"LIVE TRADE #{self.total_trades}/{MAX_LIVE_TRADES}: "
-                f"{side} {asset.upper()} ${TRADE_SIZE} @ {price:.2f} | "
-                f"latency={latency*1000:.0f}ms | {reasons}"
+                f"{side} {asset.upper()} ${TRADE_SIZE} @ fill={fill_price:.3f} "
+                f"(decision={price:.2f}) | latency={latency*1000:.0f}ms | {reasons}"
             )
-            return True
 
         except Exception as e:
             with self._lock:
                 self.active_assets.discard(asset)
+                self.attempted_markets.discard(market_id)
             logger.error(f"Live trade error: {e}")
-            return False
 
     def _record_no_fill(self, asset, side, price):
         """Registra un intento sin liquidez."""

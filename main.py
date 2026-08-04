@@ -154,10 +154,13 @@ def _tick(scanner, feed, paper, live):
                 f"WinRate={stats['win_rate']:.1f}%"
             )
 
-    # Only trade during market hours: 9AM-6PM ET (1PM-10PM UTC)
+    # Live trading solo corre 9AM-6PM ET (1PM-10PM UTC) — probado y
+    # descartado el trading 24/7 en vivo por baja liquidez de madrugada.
+    # Paper trading no arriesga plata real, así que corre siempre: da más
+    # datos para el win_rate que alimenta el Kelly sizing de paper, y deja
+    # ver cómo se comportaría la señal fuera de ese horario.
     hour_utc = datetime.now(timezone.utc).hour
-    if not (config.TRADING_START_UTC <= hour_utc < config.TRADING_END_UTC):
-        return
+    trading_hours = config.TRADING_START_UTC <= hour_utc < config.TRADING_END_UTC
 
     markets = scanner.get_markets()
     if not markets:
@@ -221,7 +224,7 @@ def _tick(scanner, feed, paper, live):
                 )
 
         # Live trade — only during trading hours
-        if live and market_id not in live_open and live.can_trade():
+        if trading_hours and live and market_id not in live_open and live.can_trade():
             live_asset_open = [p for p in live.open_positions.values() if p.get("asset") == asset]
             if not live_asset_open:
                 logger.info(f"🔴 Attempting LIVE trade: {side} {asset.upper()} @ {entry_price:.2f}")
