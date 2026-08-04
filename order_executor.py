@@ -81,9 +81,21 @@ def place_order(token_id: str, price: float, size: float, side: str = "BUY",
             try:
                 cancel_resp = client.cancel_order(OrderPayload(orderID=order_id))
                 logger.info(f"Order cancelled after timeout: {cancel_resp}")
+                return {"error": "limit not filled, cancelled"}
             except Exception as ce:
-                logger.warning(f"Cancel failed (may already be filled or expired): {ce}")
-            return {"error": "limit not filled, cancelled"}
+                # El cancel puede fallar justamente PORQUE la orden ya se llenó
+                # mientras esperábamos — no hay forma de distinguir eso de un
+                # error genuino sin ver la respuesta real. Tratarlo como "no se
+                # llenó" (comportamiento anterior) arriesgaba dejar una posición
+                # real sin registrar y, peor, reintentar el mismo mercado y
+                # terminar con una posición duplicada. Se marca como estado
+                # desconocido en vez de asumir nada.
+                logger.error(
+                    f"⚠️ Cancel falló después del timeout para orden {order_id} — "
+                    f"estado de fill DESCONOCIDO (puede haberse llenado o no): {ce}. "
+                    f"Revisar manualmente en Polymarket."
+                )
+                return {"error": "cancel failed, fill status unknown", "unknown_fill": True, "order_id": order_id}
 
         return {"error": f"unexpected status: {status}"}
 

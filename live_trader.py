@@ -74,6 +74,7 @@ class LiveTrader:
         self.no_fill_count = 0
         self.blocked_count = 0
         self.recent_no_fills = []  # últimos intentos sin liquidez
+        self.unknown_fills = []  # ordenes cuyo estado de fill no se pudo confirmar — revisar a mano
         self._client = None
         self.day_start_balance = None
         self.current_trading_day = None
@@ -230,6 +231,29 @@ class LiveTrader:
             if "error" in resp:
                 error_msg = resp["error"]
                 logger.error(f"Order failed: {error_msg}")
+
+                if resp.get("unknown_fill"):
+                    # No sabemos si esta orden se llenó o no — NO se libera
+                    # attempted_markets (evita un reintento que podría duplicar
+                    # una posición real ya abierta), y se deja registrado para
+                    # revisión manual en vez de asumir que fue una pérdida o
+                    # descartarlo en silencio.
+                    logger.error(
+                        f"⚠️⚠️ Estado de fill DESCONOCIDO: {side} {asset.upper()} "
+                        f"market={market_id} order_id={resp.get('order_id')} — "
+                        f"revisar manualmente en Polymarket. No se reintenta este mercado."
+                    )
+                    with self._lock:
+                        self.unknown_fills.append({
+                            "market_id": market_id,
+                            "asset": asset,
+                            "side": side,
+                            "order_id": resp.get("order_id"),
+                            "price": price,
+                            "time": datetime.now(timezone.utc).strftime("%H:%M UTC"),
+                        })
+                    return
+
                 # Si es un no-fill (límite no llenado), registrarlo
                 if "not filled" in error_msg or "cancelled" in error_msg:
                     self._record_no_fill(asset, side, price)
@@ -361,6 +385,7 @@ class LiveTrader:
                 "no_fill_count": self.no_fill_count,
                 "blocked_count": self.blocked_count,
                 "recent_no_fills": list(self.recent_no_fills[:10]),
+                "unknown_fills": list(self.unknown_fills),
                 "by_asset": by_asset,
                 "balance": cash_balance,
                 "today_pnl": self.today_pnl,
