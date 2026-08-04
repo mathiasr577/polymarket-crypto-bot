@@ -49,18 +49,37 @@ class LiveTrader:
             logger.error(f"LiveTrader init error: {e}")
 
     def _check_day_rollover(self):
-        """Reinicia el tracking de drawdown diario al cruzar la medianoche ET."""
+        """Reinicia el tracking de drawdown diario al cruzar la medianoche ET.
+
+        Si get_balance() falla o devuelve 0 (error transitorio de red/API),
+        NO se acepta ese valor como day_start_balance — se reintenta en el
+        próximo tick. Antes, un solo fallo dejaba day_start_balance=0.0 para
+        todo el día, y como `if self.day_start_balance and ... > 0` es False
+        con 0.0, el freno de drawdown quedaba desactivado en silencio el
+        resto de la jornada.
+        """
         today = (datetime.now(timezone.utc) + ET_OFFSET).date()
         with self._lock:
-            if self.current_trading_day == today:
+            is_new_day = self.current_trading_day != today
+            needs_balance = is_new_day or not self.day_start_balance or self.day_start_balance <= 0
+            if not needs_balance:
                 return
-            self.current_trading_day = today
-            self.today_pnl = 0.0
-            self._drawdown_paused = False
+            if is_new_day:
+                self.current_trading_day = today
+                self.today_pnl = 0.0
+                self._drawdown_paused = False
+
         balance = self.get_balance()
+        if not balance or balance <= 0:
+            logger.error(
+                f"Could not fetch balance for drawdown tracking (got {balance}) — "
+                f"drawdown circuit breaker inactive until this succeeds; retrying next tick"
+            )
+            return
+
         with self._lock:
             self.day_start_balance = balance
-        logger.info(f"New trading day {today}: day_start_balance=${balance:.2f}")
+        logger.info(f"Trading day {today}: day_start_balance=${balance:.2f}")
 
     def can_trade(self) -> bool:
         self._check_day_rollover()
