@@ -20,15 +20,30 @@ MAX_NO_FILLS_HISTORY = 20
 # del código.
 ET_OFFSET = timedelta(hours=-4)
 
-# El campo con el precio real de fill no está documentado en la respuesta de
-# py_clob_client_v2 — se prueban los nombres más comunes en orden y, si
-# ninguno aparece, se usa el precio de decisión (mismo comportamiento que
-# antes) dejando un warning en el log para poder confirmar el campo correcto
-# mirando una respuesta real en los logs de Railway.
+# Confirmado contra una respuesta real de producción (04 ago 2026) para una
+# orden BUY matched: {'takingAmount': '8.93', 'makingAmount': '5.0901', ...}
+# — no hay un campo "price" directo. makingAmount = USDC pagado, takingAmount
+# = shares recibidas, así que precio real = makingAmount / takingAmount.
+# Se dejan además algunos nombres de campo alternativos por si el schema
+# cambia con otro tipo de orden; si nada matchea, se cae al precio/tamaño de
+# decisión (comportamiento anterior) con un warning para poder ajustar esto
+# de nuevo si hace falta.
 _FILL_PRICE_FIELDS = ("price", "avgPrice", "average_price", "averagePrice", "fillPrice", "fill_price")
 
 
-def _extract_fill_price(resp: dict, fallback: float) -> float:
+def _extract_fill_info(resp: dict, decision_price: float) -> tuple[float, float]:
+    """Devuelve (precio_real_de_fill, costo_real_en_usdc)."""
+    taking = resp.get("takingAmount")
+    making = resp.get("makingAmount")
+    if taking is not None and making is not None:
+        try:
+            shares = float(taking)
+            cost = float(making)
+            if shares > 0 and cost > 0:
+                return cost / shares, cost
+        except (TypeError, ValueError):
+            pass
+
     for key in _FILL_PRICE_FIELDS:
         val = resp.get(key)
         if val is None:
@@ -38,13 +53,15 @@ def _extract_fill_price(resp: dict, fallback: float) -> float:
         except (TypeError, ValueError):
             continue
         if fv > 0:
-            return fv
+            return fv, TRADE_SIZE
+
     logger.warning(
-        f"No pude identificar el precio real de fill en la respuesta de la orden "
-        f"(probé {_FILL_PRICE_FIELDS}) — uso el precio de decisión {fallback:.3f} "
-        f"como aproximación. Respuesta completa: {resp}"
+        f"No pude identificar el precio/costo real de fill en la respuesta de la orden "
+        f"(probé makingAmount/takingAmount y {_FILL_PRICE_FIELDS}) — uso el precio de "
+        f"decisión {decision_price:.3f} y tamaño ${TRADE_SIZE:.2f} como aproximación. "
+        f"Respuesta completa: {resp}"
     )
-    return fallback
+    return decision_price, TRADE_SIZE
 
 class LiveTrader:
     def __init__(self):
@@ -228,7 +245,7 @@ class LiveTrader:
                     self.attempted_markets.discard(market_id)
                 return
 
-            fill_price = _extract_fill_price(resp, fallback=price)
+            fill_price, real_cost = _extract_fill_info(resp, price)
 
             with self._lock:
                 self.total_trades += 1
@@ -237,7 +254,7 @@ class LiveTrader:
                     "title": title,
                     "asset": asset,
                     "side": side,
-                    "size": TRADE_SIZE,
+                    "size": real_cost,
                     "price": fill_price,
                     "decision_price": price,
                     "token_id": token_id,
@@ -250,7 +267,7 @@ class LiveTrader:
 
             logger.info(
                 f"LIVE TRADE #{self.total_trades}/{MAX_LIVE_TRADES}: "
-                f"{side} {asset.upper()} ${TRADE_SIZE} @ fill={fill_price:.3f} "
+                f"{side} {asset.upper()} ${real_cost:.2f} @ fill={fill_price:.3f} "
                 f"(decision={price:.2f}) | latency={latency*1000:.0f}ms | {reasons}"
             )
 
@@ -283,10 +300,11 @@ class LiveTrader:
             side = trade["side"]
             win = (side == outcome)
             entry_price = trade["price"]
+            cost = trade.get("size", TRADE_SIZE)
             if win:
-                pnl = TRADE_SIZE * ((1.0 - entry_price) / entry_price) * (1 - 0.07)
+                pnl = cost * ((1.0 - entry_price) / entry_price) * (1 - 0.07)
             else:
-                pnl = -TRADE_SIZE
+                pnl = -cost
             result = {**trade, "outcome": outcome, "win": win, "pnl": pnl}
             self.results.append(result)
             self.today_pnl += pnl
