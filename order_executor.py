@@ -92,7 +92,20 @@ def place_order(token_id: str, price: float, size: float, side: str = "BUY",
         return {"error": str(e)}
 
 
+_BALANCE_FIELDS = ("balance", "collateral", "amount", "value")
+
+
 def get_balance() -> float:
+    """
+    get_balance_allowance() devuelve un dict, no un número — float(raw)
+    directo fallaba SIEMPRE (no de forma intermitente), lo que significa que
+    el circuit breaker de drawdown nunca pudo tomar un balance válido desde
+    que se implementó. El schema exacto no está documentado en este repo,
+    así que se prueban las claves más probables; si ninguna aparece, se
+    loguea el dict completo para poder confirmar la clave correcta con los
+    logs de Railway, y se cae a 0.0 (mismo comportamiento anterior, pero
+    ahora visible y con reintento en vez de silencioso).
+    """
     client = get_client()
     if not client:
         return 0.0
@@ -101,6 +114,15 @@ def get_balance() -> float:
         raw = client.get_balance_allowance(
             params=BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
         )
+        if isinstance(raw, dict):
+            for key in _BALANCE_FIELDS:
+                if key in raw:
+                    try:
+                        return float(raw[key]) / 1e6
+                    except (TypeError, ValueError):
+                        continue
+            logger.error(f"get_balance_allowance devolvió un dict sin claves reconocidas: {raw}")
+            return 0.0
         return float(raw) / 1e6
     except Exception as e:
         logger.error(f"Balance error: {e}")
