@@ -13,12 +13,22 @@ reemplaza la banda de precio fija (que rechazaba señales fuertes por caras Y
 señales tempranas por no tener delta suficiente) por un filtro de edge que
 funciona a cualquier precio dentro de los límites de liquidez/ejecución.
 
-- Ventana de entrada: T-120s a T-8s (antes T-180s; calibrado con 3 días de
-  trading real: el bucket T-150/180s concentraba ~la mitad del volumen y
-  explicaba casi toda la pérdida neta del período)
+- Ventana de entrada: T-120s a T-55s (antes T-120s a T-8s; calibrado con 3
+  días de trading real bajo el modelo con drift/EWMA — ver más abajo)
 - Precio mínimo: 0.45 (antes 0.25; por debajo de 0.45 el win rate real fue
   5-48%, muy por debajo del breakeven)
 - Filtro real: p_modelo >= max(breakeven(precio) + EDGE_MARGIN, MIN_MODEL_PROB)
+
+ENTRY_WINDOW_END subió de 8 a 55: order_executor.py deja la orden límite
+abierta hasta 55s esperando que se llene (time.sleep(55)) antes de
+cancelarla. Si se genera una señal con menos de 55s restantes y la orden
+no se llena al instante, el código intenta esperar más tiempo del que le
+queda al mercado — cualquier fill que ocurra ahí pasa en los segundos más
+caóticos y con menos liquidez antes del cierre. En los 3 días de datos
+reales (1-3 agosto) el PnL promedio por trade mejora de forma monótona a
+medida que se recorta esta cola, con pico exactamente en 55s (+0.562 vs
++0.235 en el corte original de 8s) y empeora de nuevo pasados los 55s —
+coincide con la constante del ejecutor, no es ruido de muestra.
 
 El modelo browniano puro no tiene drift: asume que el precio futuro está
 centrado en el precio actual. Eso lo deja ciego a tendencias sostenidas
@@ -42,7 +52,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 ENTRY_WINDOW_START = 120
-ENTRY_WINDOW_END = 8
+ENTRY_WINDOW_END = 55
 
 MIN_PRICE = 0.45
 MAX_PRICE = 0.80
