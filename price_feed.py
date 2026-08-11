@@ -17,11 +17,19 @@ VOL_LOOKBACK_SAMPLES = 20   # ~10 min de historia a PRICE_INTERVAL=30s
 MIN_VOL_SAMPLES = 6
 EWMA_HALFLIFE_MINUTES = 4   # a los 4 min, una muestra pesa la mitad que la actual
 
-TREND_LOOKBACK_MINUTES = 12  # horizonte de la regresión de tendencia
+TREND_LOOKBACK_MINUTES = 12  # horizonte corto: reacciona rápido a reversiones genuinas
 MIN_TREND_SAMPLES = 10
 
+# Horizonte largo: detecta tendencias sostenidas de varias horas que el corto
+# no puede ver (solo mira 12 min). Agregado el 10 ago tras dos días seguidos
+# (8 y 9 de agosto) donde las apuestas DOWN perdieron sistemáticamente
+# (25% de win rate ambos días) mientras UP rendía bien (62-80%) — la señal
+# corta no alcanza a capturar una tendencia que viene sostenida por horas.
+TREND_LOOKBACK_MINUTES_LONG = 90
+MIN_TREND_SAMPLES_LONG = 60   # no confiar en la señal larga hasta tener ~30 min reales
+
 class PriceFeed:
-    def __init__(self, maxlen=200):
+    def __init__(self, maxlen=400):
         self.prices = {
             "bitcoin": deque(maxlen=maxlen),
             "ethereum": deque(maxlen=maxlen),
@@ -202,19 +210,28 @@ class PriceFeed:
 
     def get_trend_drift_per_sec(self, asset: str) -> float | None:
         """Pendiente de una regresión lineal de log(precio) vs tiempo sobre
-        los últimos TREND_LOOKBACK_MINUTES minutos. Devuelve el drift
-        estimado en retorno fraccional por segundo (positivo = tendencia
-        alcista, negativo = bajista).
+        los últimos TREND_LOOKBACK_MINUTES minutos (horizonte corto, ~12 min).
+        Devuelve el drift estimado en retorno fraccional por segundo
+        (positivo = tendencia alcista, negativo = bajista).
+        """
+        return self._trend_drift(asset, TREND_LOOKBACK_MINUTES, MIN_TREND_SAMPLES)
 
-        Usa una regresión (no solo los dos extremos) para que un par de
+    def get_trend_drift_per_sec_long(self, asset: str) -> float | None:
+        """Igual que get_trend_drift_per_sec pero sobre un horizonte largo
+        (~90 min), para detectar tendencias sostenidas de varias horas que
+        el horizonte corto no puede ver."""
+        return self._trend_drift(asset, TREND_LOOKBACK_MINUTES_LONG, MIN_TREND_SAMPLES_LONG)
+
+    def _trend_drift(self, asset: str, lookback_minutes: float, min_samples: int) -> float | None:
+        """Usa una regresión (no solo los dos extremos) para que un par de
         muestras ruidosas en el borde de la ventana no dominen la estimación.
         """
-        lookback_samples = int(TREND_LOOKBACK_MINUTES * 60 / PRICE_INTERVAL)
+        lookback_samples = int(lookback_minutes * 60 / PRICE_INTERVAL)
         with self._lock:
             prices = list(self.prices[asset])[-lookback_samples:]
             timestamps = list(self.timestamps[asset])[-lookback_samples:]
 
-        if len(prices) < MIN_TREND_SAMPLES:
+        if len(prices) < min_samples:
             return None
 
         arr = np.array(prices, dtype=float)

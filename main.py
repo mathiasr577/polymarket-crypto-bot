@@ -194,6 +194,7 @@ def _tick(scanner, feed, paper, live):
         indicators["vol_per_sqrt_sec"] = feed.get_volatility_per_sqrt_sec(asset)
         indicators["cross_asset_confirm"] = _cross_asset_confirm(feed, asset)
         indicators["trend_drift_per_sec"] = feed.get_trend_drift_per_sec(asset)
+        indicators["trend_drift_long_per_sec"] = feed.get_trend_drift_per_sec_long(asset)
 
         signal = generate_signal(indicators, market)
         if signal["blocked"]:

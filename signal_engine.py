@@ -45,6 +45,12 @@ a diferencia de los demás parámetros de este archivo, este ajuste no se
 pudo validar contra trades reales (no hay historial de precio tick a tick
 en los exports de Polymarket, solo resultados de mercado) — son un punto
 de partida conservador, no un valor calibrado.
+
+El drift corto (12 min) tampoco alcanza cuando la tendencia viene sostenida
+por horas: el 8 y 9 de agosto las apuestas DOWN perdieron sistemáticamente
+(25% de win rate ambos días) contra una tendencia alcista que el horizonte
+corto no podía ver. Se agregó un segundo término con horizonte largo
+(~90 min, DRIFT_WEIGHT_LONG/MAX_DRIFT_Z_LONG) que se suma de la misma forma.
 """
 import math
 import logging
@@ -66,9 +72,19 @@ MIN_MODEL_PROB = 0.62       # piso absoluto: nunca operar si el modelo apenas ro
                              # cuotas son generosas)
 CROSS_ASSET_BONUS = 0.015
 
-DRIFT_WEIGHT = 0.5   # cuánto se confía el ajuste de tendencia (0=ignorar, 1=full)
-MAX_DRIFT_Z = 1.0    # tope al aporte del drift al z-score, para que no pueda
+DRIFT_WEIGHT = 0.5   # cuánto se confía el ajuste de tendencia corto (0=ignorar, 1=full)
+MAX_DRIFT_Z = 1.0    # tope al aporte del drift corto al z-score, para que no pueda
                       # por sí solo voltear una señal fuerte en contra
+
+# Drift de horizonte largo (~90 min, ver price_feed.py). Agregado el 10 ago:
+# el horizonte corto (12 min) no alcanza a detectar una tendencia sostenida
+# de horas — el 8 y 9 de agosto las apuestas DOWN perdieron sistemáticamente
+# contra una tendencia alcista que venía de mucho antes de esos 12 min.
+# Peso y tope más generosos que el corto porque una tendencia confirmada por
+# 90 min de datos es evidencia más sólida que un vistazo de 12 min — pero
+# sigue siendo un ajuste sin validar contra trades reales todavía.
+DRIFT_WEIGHT_LONG = 0.6
+MAX_DRIFT_Z_LONG = 1.5
 
 
 def _norm_cdf(z: float) -> float:
@@ -136,6 +152,13 @@ def generate_signal(indicators: dict, market: dict) -> dict:
         drift_z = max(-MAX_DRIFT_Z, min(MAX_DRIFT_Z, raw_drift_z)) * DRIFT_WEIGHT
         z += drift_z
         drift_note = f" drift_z={drift_z:+.2f}"
+
+    drift_long = indicators.get("trend_drift_long_per_sec")
+    if drift_long is not None:
+        raw_drift_long_z = drift_long * math.sqrt(max(seconds_left, 1)) / sigma
+        drift_long_z = max(-MAX_DRIFT_Z_LONG, min(MAX_DRIFT_Z_LONG, raw_drift_long_z)) * DRIFT_WEIGHT_LONG
+        z += drift_long_z
+        drift_note += f" drift_long_z={drift_long_z:+.2f}"
 
     p_up = _norm_cdf(z)
 
