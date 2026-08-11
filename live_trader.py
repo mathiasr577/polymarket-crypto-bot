@@ -12,8 +12,19 @@ from config import DRAWDOWN_LIMIT
 logger = logging.getLogger(__name__)
 
 MAX_LIVE_TRADES = 999
-TRADE_SIZE = 5.0
+TRADE_SIZE = 5.0     # techo: comportamiento de siempre una vez la cuenta es sana
 MAX_NO_FILLS_HISTORY = 20
+
+# Tamaño de apuesta como % del balance actual en vez de $5 fijo. Agregado el
+# 10 ago: con cuentas chicas ($37.90 en ese momento), $5 fijo es >13% del
+# balance por trade — 2-3 pérdidas seguidas ya tocan el 25% de drawdown y el
+# circuit breaker corta el día antes de juntar suficiente muestra para
+# validar si los arreglos de señal (drift largo, freno por lado) funcionan.
+# Con % del balance, el número de intentos que tolera el freno no colapsa
+# cuando la cuenta es chica, y una vez la cuenta supera ~$62.50 el tamaño
+# vuelve a toparse en TRADE_SIZE=$5 (mismo comportamiento de antes).
+TARGET_RISK_PCT = 0.08
+MIN_TRADE_USD = 2.0
 
 # ET en verano (EDT) es UTC-4. Mismo offset fijo que usan TRADING_START_UTC/
 # TRADING_END_UTC en config.py — no es DST-aware, es consistente con el resto
@@ -31,8 +42,11 @@ ET_OFFSET = timedelta(hours=-4)
 _FILL_PRICE_FIELDS = ("price", "avgPrice", "average_price", "averagePrice", "fillPrice", "fill_price")
 
 
-def _extract_fill_info(resp: dict, decision_price: float) -> tuple[float, float]:
-    """Devuelve (precio_real_de_fill, costo_real_en_usdc)."""
+def _extract_fill_info(resp: dict, decision_price: float, intended_size: float) -> tuple[float, float]:
+    """Devuelve (precio_real_de_fill, costo_real_en_usdc). intended_size es
+    el fallback si no se puede leer el costo real — antes era el TRADE_SIZE
+    fijo, ahora que el tamaño varía con el balance hay que pasarlo explícito
+    para no reportar $5 en una apuesta que en realidad fue de $3."""
     taking = resp.get("takingAmount")
     making = resp.get("makingAmount")
     if taking is not None and making is not None:
@@ -53,15 +67,15 @@ def _extract_fill_info(resp: dict, decision_price: float) -> tuple[float, float]
         except (TypeError, ValueError):
             continue
         if fv > 0:
-            return fv, TRADE_SIZE
+            return fv, intended_size
 
     logger.warning(
         f"No pude identificar el precio/costo real de fill en la respuesta de la orden "
         f"(probé makingAmount/takingAmount y {_FILL_PRICE_FIELDS}) — uso el precio de "
-        f"decisión {decision_price:.3f} y tamaño ${TRADE_SIZE:.2f} como aproximación. "
+        f"decisión {decision_price:.3f} y tamaño ${intended_size:.2f} como aproximación. "
         f"Respuesta completa: {resp}"
     )
-    return decision_price, TRADE_SIZE
+    return decision_price, intended_size
 
 class LiveTrader:
     def __init__(self):
@@ -153,6 +167,18 @@ class LiveTrader:
         with self._lock:
             self.blocked_count += 1
 
+    def _current_trade_size(self) -> float:
+        """balance actual ~= day_start_balance + today_pnl. Aproximado: no
+        resta el costo de posiciones abiertas todavía no resueltas (como
+        mucho 2 * TRADE_SIZE de margen de error), suficiente para dimensionar
+        la apuesta sin pegarle a la red en cada intento."""
+        with self._lock:
+            balance = (self.day_start_balance or 0) + self.today_pnl
+        if balance <= 0:
+            return MIN_TRADE_USD
+        size = balance * TARGET_RISK_PCT
+        return round(min(TRADE_SIZE, max(MIN_TRADE_USD, size)), 2)
+
     def get_balance(self) -> float:
         try:
             from order_executor import get_balance
@@ -192,15 +218,17 @@ class LiveTrader:
             self.attempted_markets.add(market_id)
             self.active_assets.add(asset)
 
+        intended_size = self._current_trade_size()
+
         t = threading.Thread(
             target=self._execute_order,
-            args=(market_id, title, asset, side, price, token_id, reasons, tokens),
+            args=(market_id, title, asset, side, price, token_id, reasons, tokens, intended_size),
             daemon=True,
         )
         t.start()
         return True
 
-    def _execute_order(self, market_id, title, asset, side, price, token_id, reasons, tokens):
+    def _execute_order(self, market_id, title, asset, side, price, token_id, reasons, tokens, intended_size):
         """Corre en un hilo aparte — ver open_trade(). Libera active_assets
         siempre, y libera attempted_markets solo si el intento falló (no
         matched), para permitir un reintento del mismo mercado mientras
@@ -218,7 +246,7 @@ class LiveTrader:
             resp = place_order(
                 token_id=token_id,
                 price=round(price, 2),
-                size=TRADE_SIZE,
+                size=intended_size,
                 side="BUY",
                 alt_token_id=alt_token_id,
             )
@@ -269,7 +297,7 @@ class LiveTrader:
                     self.attempted_markets.discard(market_id)
                 return
 
-            fill_price, real_cost = _extract_fill_info(resp, price)
+            fill_price, real_cost = _extract_fill_info(resp, price, intended_size)
 
             with self._lock:
                 self.total_trades += 1
@@ -372,7 +400,7 @@ class LiveTrader:
                 "win_rate": len(wins) / len(self.results) * 100 if self.results else 0,
                 "total_pnl": total_pnl,
                 "pnl": total_pnl,
-                "roi": (total_pnl / (len(self.results) * TRADE_SIZE) * 100) if self.results else 0,
+                "roi": (total_pnl / sum(r.get("size", TRADE_SIZE) for r in self.results) * 100) if self.results else 0,
                 "best_trade": best,
                 "worst_trade": worst,
                 "open_count": len(self.open_positions),
