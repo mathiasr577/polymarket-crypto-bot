@@ -274,6 +274,34 @@ class PaperTrader:
         except Exception:
             return 0.5
 
+    def get_win_rate_by_side(self, side: str, n=20):
+        """Win rate reciente de un lado (UP/DOWN) sobre las últimas n
+        resoluciones de paper trading. Se usa paper (no live) porque corre
+        24/7 sin las pausas del circuit breaker, así que junta muestra más
+        rápido con la misma señal real.
+
+        Devuelve (win_rate, n_muestras) o None si no hay DB o no hay datos.
+        """
+        if not self.conn:
+            return None
+        try:
+            with self.conn.cursor() as cur:
+                cur.execute("""
+                    SELECT COUNT(*) FILTER (WHERE win)::float / NULLIF(COUNT(*),0), COUNT(*)
+                    FROM (
+                        SELECT win FROM paper_trades
+                        WHERE resolved_at IS NOT NULL AND side=%s
+                        ORDER BY resolved_at DESC LIMIT %s
+                    ) t
+                """, (side, n))
+                row = cur.fetchone()
+                if not row or not row[1]:
+                    return None
+                return (float(row[0]) if row[0] is not None else None, int(row[1]))
+        except Exception as e:
+            logger.error(f"Win rate by side error: {e}")
+            return None
+
 
 _trader = PaperTrader()
 

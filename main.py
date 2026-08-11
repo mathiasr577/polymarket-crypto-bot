@@ -195,6 +195,10 @@ def _tick(scanner, feed, paper, live):
         indicators["cross_asset_confirm"] = _cross_asset_confirm(feed, asset)
         indicators["trend_drift_per_sec"] = feed.get_trend_drift_per_sec(asset)
         indicators["trend_drift_long_per_sec"] = feed.get_trend_drift_per_sec_long(asset)
+        indicators["side_recent_win_rate"] = {
+            "UP": paper.get_win_rate_by_side("UP", 20),
+            "DOWN": paper.get_win_rate_by_side("DOWN", 20),
+        }
 
         signal = generate_signal(indicators, market)
         if signal["blocked"]:

@@ -86,6 +86,16 @@ MAX_DRIFT_Z = 1.0    # tope al aporte del drift corto al z-score, para que no pu
 DRIFT_WEIGHT_LONG = 0.6
 MAX_DRIFT_Z_LONG = 1.5
 
+# Freno por lado basado en resultados reales recientes (no en el precio):
+# complementa al drift — si un lado viene perdiendo mucho más de lo que
+# debería, exige más edge en vez de confiar en que el modelo de precio ya
+# lo está compensando. Requiere una muestra mínima antes de aplicarse para
+# no reaccionar a 2-3 trades de ruido.
+SIDE_DAMPENER_MIN_TRADES = 15
+SIDE_DAMPENER_THRESHOLD = 0.50
+SIDE_DAMPENER_MAX_PENALTY = 0.15
+SIDE_DAMPENER_SCALE = 0.6
+
 
 def _norm_cdf(z: float) -> float:
     return 0.5 * (1 + math.erf(z / math.sqrt(2)))
@@ -174,6 +184,20 @@ def generate_signal(indicators: dict, market: dict) -> dict:
     if cross_confirm == best_side:
         p_model = min(0.97, p_model + CROSS_ASSET_BONUS)
         reasons.append(f"Other asset also leans {best_side} (+{CROSS_ASSET_BONUS*100:.1f}pp)")
+
+    side_stats = (indicators.get("side_recent_win_rate") or {}).get(best_side)
+    if side_stats:
+        recent_wr, n_samples = side_stats
+        if (
+            n_samples >= SIDE_DAMPENER_MIN_TRADES
+            and recent_wr is not None
+            and recent_wr < SIDE_DAMPENER_THRESHOLD
+        ):
+            penalty = min(SIDE_DAMPENER_MAX_PENALTY, (SIDE_DAMPENER_THRESHOLD - recent_wr) * SIDE_DAMPENER_SCALE)
+            p_model = max(0.50, p_model - penalty)
+            reasons.append(
+                f"{best_side} recent win rate {recent_wr*100:.0f}% (n={n_samples}) -> penalty -{penalty*100:.1f}pp"
+            )
 
     up_price = market.get("up_price", 0.5)
     down_price = market.get("down_price", 0.5)
