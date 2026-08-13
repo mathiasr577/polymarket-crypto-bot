@@ -111,11 +111,32 @@ HTML = """
     <div class="value red">${{ "%+.2f"|format(stats.worst_trade) }}</div>
   </div>
   <div class="card">
-    <div class="label">🏦 Balance paper</div>
+    <div class="label">🏦 Balance</div>
     <div class="value">${{ "%.2f"|format(stats.balance) }}</div>
-    <div class="sublabel">simulado</div>
+    <div class="sublabel">{{ 'real' if stats.paper is defined else 'simulado (paper)' }}</div>
   </div>
 </div>
+
+{% if stats.paper is defined %}
+<div class="section">
+  <h2>📄 Paper trading (simulado — no es plata real)</h2>
+  <div class="grid">
+    <div class="card">
+      <div class="label">Balance paper</div>
+      <div class="value purple">${{ "%.2f"|format(stats.paper.balance) }}</div>
+    </div>
+    <div class="card">
+      <div class="label">P&L paper</div>
+      <div class="value {{ 'green' if stats.paper.pnl >= 0 else 'red' }}">${{ "%+.2f"|format(stats.paper.pnl) }}</div>
+    </div>
+    <div class="card">
+      <div class="label">Win rate paper</div>
+      <div class="value">{{ "%.1f"|format(stats.paper.win_rate) }}%</div>
+      <div class="sublabel">{{ stats.paper.wins }}W / {{ stats.paper.total_trades - stats.paper.wins }}L</div>
+    </div>
+  </div>
+</div>
+{% endif %}
 
 {% if prices %}
 <div class="section">
@@ -280,6 +301,11 @@ def create_dashboard(get_stats_fn, get_prices_fn, get_markets_fn=None, mode="PAP
                     t2[k] = str(v)
             recent.append(t2)
         stats["recent_trades"] = recent
+
+        # stats["paper"], si existe, sigue siendo un dict plano — convertirlo
+        # también a objeto para que stats.paper.balance funcione en el template.
+        if "paper" in stats:
+            stats["paper"] = type("P", (), dict(stats["paper"]))()
 
         return render_template_string(
             HTML,

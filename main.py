@@ -255,10 +255,18 @@ def get_prices_snapshot():
 
 
 def get_combined_stats():
+    """En modo live, el dashboard debe mostrar como stats PRINCIPALES las de
+    live_trader (plata real) — antes se devolvía paper_stats como base y las
+    de live quedaban anidadas en stats["live"], que el template nunca lee.
+    Resultado: el dashboard mostraba el P&L/win-rate/trades de paper (miles
+    de dólares simulados) bajo el banner "LIVE TRADING", sin ningún indicio
+    de que esos números no eran reales. Ahora paper queda anidado y
+    claramente etiquetado en su propia sección."""
     paper_stats = get_trader().get_stats()
     if not config.PAPER_TRADING:
         live_stats = get_live_trader().get_stats()
-        paper_stats["live"] = live_stats
+        live_stats["paper"] = paper_stats
+        return live_stats
     return paper_stats
 
 
