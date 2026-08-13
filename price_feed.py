@@ -44,6 +44,16 @@ class PriceFeed:
             "bitcoin": {},
             "ethereum": {},
         }
+        # Último precio visto dentro de cada ventana de 5 minutos (se va
+        # actualizando en cada fetch). Se usa para el shadow-mode logger
+        # (chainlink_feed.py / shadow_logger.py) como aproximación en vivo
+        # al precio de "cierre" — separado de window_ref_prices porque ese
+        # dict solo guarda el primero (open) y signal_engine.py depende de
+        # que siga siendo así.
+        self.window_last_prices = {
+            "bitcoin": {},
+            "ethereum": {},
+        }
         self._lock = threading.Lock()
         self._running = False
         self._thread = None
@@ -88,10 +98,14 @@ class PriceFeed:
                 if window_ts not in self.window_ref_prices["bitcoin"]:
                     self.window_ref_prices["bitcoin"][window_ts] = btc
                     logger.info(f"BTC ref price for window {window_ts}: ${btc:,.2f}")
+                self.window_last_prices["bitcoin"][window_ts] = btc
                 # Limpiar ventanas viejas (más de 30 minutos)
                 old = [k for k in self.window_ref_prices["bitcoin"] if k < window_ts - 1800]
                 for k in old:
                     del self.window_ref_prices["bitcoin"][k]
+                old = [k for k in self.window_last_prices["bitcoin"] if k < window_ts - 1800]
+                for k in old:
+                    del self.window_last_prices["bitcoin"][k]
 
             if eth > 0:
                 self.prices["ethereum"].append(eth)
@@ -99,9 +113,13 @@ class PriceFeed:
                 if window_ts not in self.window_ref_prices["ethereum"]:
                     self.window_ref_prices["ethereum"][window_ts] = eth
                     logger.info(f"ETH ref price for window {window_ts}: ${eth:,.2f}")
+                self.window_last_prices["ethereum"][window_ts] = eth
                 old = [k for k in self.window_ref_prices["ethereum"] if k < window_ts - 1800]
                 for k in old:
                     del self.window_ref_prices["ethereum"][k]
+                old = [k for k in self.window_last_prices["ethereum"] if k < window_ts - 1800]
+                for k in old:
+                    del self.window_last_prices["ethereum"][k]
 
         logger.debug(f"BTC=${btc:,.2f} ETH=${eth:,.2f} window={window_ts}")
 
@@ -115,6 +133,14 @@ class PriceFeed:
         window_ts = int(time.time() // 300) * 300
         with self._lock:
             return self.window_ref_prices[asset].get(window_ts)
+
+    def get_window_last_price(self, asset: str, window_ts: int) -> float | None:
+        """Último precio de Kraken visto dentro de una ventana de 5 min
+        específica — usado por el shadow-mode logger como aproximación al
+        precio de cierre (no confundir con get_current_window_ref, que
+        siempre devuelve el precio de APERTURA de la ventana)."""
+        with self._lock:
+            return self.window_last_prices[asset].get(window_ts)
 
     def get_latest(self, asset: str) -> float | None:
         with self._lock:

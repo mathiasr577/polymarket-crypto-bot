@@ -138,6 +138,40 @@ HTML = """
 </div>
 {% endif %}
 
+{% if shadow_stats and shadow_stats.resolved %}
+<div class="section">
+  <h2>🔬 Shadow-mode: Chainlink TWAP vs. ganador real (fase 1)</h2>
+  <div class="grid">
+    <div class="card">
+      <div class="label">Mercados resueltos</div>
+      <div class="value">{{ shadow_stats.resolved }}</div>
+      <div class="sublabel">{{ shadow_stats.resolved_clean }} sin huecos de datos</div>
+    </div>
+    <div class="card">
+      <div class="label">TWAP 30s acierta ganador</div>
+      <div class="value {{ 'green' if shadow_stats.resolved_clean and shadow_stats.twap30_correct / shadow_stats.resolved_clean >= 0.9 else 'yellow' }}">
+        {{ "%.0f"|format(shadow_stats.twap30_correct / shadow_stats.resolved_clean * 100 if shadow_stats.resolved_clean else 0) }}%
+      </div>
+    </div>
+    <div class="card">
+      <div class="label">TWAP 60s acierta ganador</div>
+      <div class="value {{ 'green' if shadow_stats.resolved_clean and shadow_stats.twap60_correct / shadow_stats.resolved_clean >= 0.9 else 'yellow' }}">
+        {{ "%.0f"|format(shadow_stats.twap60_correct / shadow_stats.resolved_clean * 100 if shadow_stats.resolved_clean else 0) }}%
+      </div>
+    </div>
+    <div class="card">
+      <div class="label">Kraken spot acierta ganador</div>
+      <div class="value">{{ "%.0f"|format(shadow_stats.kraken_correct / shadow_stats.resolved_clean * 100 if shadow_stats.resolved_clean else 0) }}%</div>
+    </div>
+    <div class="card">
+      <div class="label">⚠️ Huecos de datos</div>
+      <div class="value {{ 'red' if shadow_stats.data_gaps else 'gray' }}">{{ shadow_stats.data_gaps }}</div>
+      <div class="sublabel">mercados descartados de la comparación</div>
+    </div>
+  </div>
+</div>
+{% endif %}
+
 {% if prices %}
 <div class="section">
   <h2>💹 Precios en vivo</h2>
@@ -268,12 +302,13 @@ HTML = """
 </html>
 """
 
-def create_dashboard(get_stats_fn, get_prices_fn, get_markets_fn=None, mode="PAPER TRADING"):
+def create_dashboard(get_stats_fn, get_prices_fn, get_markets_fn=None, mode="PAPER TRADING", get_shadow_stats_fn=None):
     @app.route("/")
     def index():
         stats = get_stats_fn()
         prices = get_prices_fn()
         markets = get_markets_fn() if get_markets_fn else []
+        shadow_stats = get_shadow_stats_fn() if get_shadow_stats_fn else None
 
         # Defaults para nuevas métricas
         stats.setdefault("cash_balance", 0.0)
@@ -313,12 +348,17 @@ def create_dashboard(get_stats_fn, get_prices_fn, get_markets_fn=None, mode="PAP
             prices={k: type("I", (), v)() if v else None for k, v in prices.items()},
             markets=markets,
             mode=mode,
+            shadow_stats=shadow_stats,
             now=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
         )
 
     @app.route("/api/stats")
     def api_stats():
         return jsonify(get_stats_fn())
+
+    @app.route("/api/shadow-stats")
+    def api_shadow_stats():
+        return jsonify(get_shadow_stats_fn() if get_shadow_stats_fn else {})
 
     @app.route("/health")
     def health():

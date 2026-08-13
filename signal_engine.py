@@ -117,6 +117,7 @@ def generate_signal(indicators: dict, market: dict) -> dict:
         "token_id": None,
         "entry_price": None,
         "model_prob": None,
+        "z": None,  # expuesto para el shadow-mode logger (comparar contra el modelo TWAP)
     }
 
     if indicators is None:
@@ -171,6 +172,7 @@ def generate_signal(indicators: dict, market: dict) -> dict:
         drift_note += f" drift_long_z={drift_long_z:+.2f}"
 
     p_up = _norm_cdf(z)
+    result["z"] = z
 
     best_side = "UP" if p_up >= 0.5 else "DOWN"
     p_model = p_up if best_side == "UP" else (1 - p_up)

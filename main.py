@@ -22,6 +22,11 @@ from dashboard import create_dashboard
 if not config.PAPER_TRADING:
     from live_trader import get_live_trader
 
+# Shadow-mode: registra Chainlink TWAP/spot en paralelo, sin tocar trading.
+if config.SHADOW_MODE_ENABLED:
+    from chainlink_feed import start_chainlink_feed, get_chainlink_feed
+    from shadow_logger import get_shadow_logger
+
 # Delta mínimo del activo correlacionado para contar como confirmación cruzada
 CROSS_ASSET_MIN_DELTA = 0.0003
 
@@ -106,13 +111,15 @@ def trading_loop():
     feed = get_feed()
     paper = get_trader()
     live = get_live_trader() if not config.PAPER_TRADING else None
+    shadow = get_shadow_logger() if config.SHADOW_MODE_ENABLED else None
+    chainlink = get_chainlink_feed() if config.SHADOW_MODE_ENABLED else None
 
     logger.info(f"Trading loop started — mode: {'LIVE' if live else 'PAPER'} — warming up 60s...")
     time.sleep(60)
 
     while True:
         try:
-            _tick(scanner, feed, paper, live)
+            _tick(scanner, feed, paper, live, shadow, chainlink)
         except Exception as e:
             logger.error(f"Tick error: {e}")
         time.sleep(10)
@@ -140,8 +147,14 @@ def _cross_asset_confirm(feed, asset: str) -> str | None:
     return None
 
 
-def _tick(scanner, feed, paper, live):
+def _tick(scanner, feed, paper, live, shadow=None, chainlink=None):
     resolve_expired(paper)
+
+    if shadow and chainlink:
+        try:
+            shadow.resolve_pending(chainlink, feed)
+        except Exception as e:
+            logger.debug(f"Shadow resolve_pending error: {e}")
 
     if live:
         resolve_live_expired(live)
@@ -201,6 +214,14 @@ def _tick(scanner, feed, paper, live):
         }
 
         signal = generate_signal(indicators, market)
+
+        if shadow and chainlink:
+            try:
+                window_ts = int(time.time() // 300) * 300
+                shadow.log_decision(market, indicators, signal, chainlink, window_ts, market.get("ref_price"))
+            except Exception as e:
+                logger.debug(f"Shadow log_decision error: {e}")
+
         if signal["blocked"]:
             logger.info(f"Blocked [{asset.upper()} T-{seconds_left:.0f}s]: {signal['block_reason']}")
             continue
@@ -279,6 +300,8 @@ def main():
 
     start_feed()
     start_scanner()
+    if config.SHADOW_MODE_ENABLED:
+        start_chainlink_feed()
 
     t = threading.Thread(target=trading_loop, daemon=True)
     t.start()
@@ -288,6 +311,7 @@ def main():
         get_prices_fn=get_prices_snapshot,
         get_markets_fn=get_scanner().get_markets,
         mode=mode_label,
+        get_shadow_stats_fn=(get_shadow_logger().get_validation_stats if config.SHADOW_MODE_ENABLED else None),
     )
 
     flask_app.run(host="0.0.0.0", port=config.PORT)

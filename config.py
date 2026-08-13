@@ -37,3 +37,8 @@ PRICE_INTERVAL = 30         # seconds
 MARKET_WINDOW_MIN = 10      # only markets resolving within 10 min
 
 PORT = int(os.environ.get("PORT", 5000))
+
+# Shadow-mode: registra Chainlink TWAP (30s y 60s) + spot en paralelo al
+# trading real, sin tocar ninguna decisión. Kill switch por si el feed RTDS
+# da problemas en producción — no afecta paper/live si se apaga.
+SHADOW_MODE_ENABLED = os.environ.get("SHADOW_MODE_ENABLED", "true").lower() == "true"

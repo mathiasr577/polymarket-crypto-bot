@@ -3,4 +3,5 @@ requests>=2.31.0
 psycopg2-binary>=2.9.9
 numpy>=1.26.0
 gunicorn>=21.2.0
+websocket-client>=1.7.0
 py-clob-client-v2
