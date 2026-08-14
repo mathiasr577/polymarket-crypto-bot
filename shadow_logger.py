@@ -447,6 +447,87 @@ class ShadowLogger:
             logger.error(f"Shadow backtest error: {e}")
             return {}
 
+    def get_calibration_report(self) -> dict:
+        """La pregunta que importa de verdad no es "¿qué tan seguido acierta
+        el lado?" sino "¿le gana al breakeven que exige el precio al que
+        realmente se compra?" — con el fee del 7%, el breakeven sube muy
+        rápido con el precio (a 0.50 hace falta ~52%, a 0.80 hace falta
+        ~81%). Un modelo con 72% de acierto puede perder plata sistemática-
+        mente si compra sobre todo en precios donde el breakeven real ya
+        pasó ese 72%.
+
+        Agrupa por banda de precio (el precio real pagado por el lado que
+        el modelo eligió) y compara, con datos empíricos reales — no la
+        fórmula teórica de campana de Gauss del modelo — si el modelo viejo
+        y el TWAP60 superan el breakeven en cada banda. También reporta la
+        probabilidad TEÓRICA promedio que el modelo se auto-asignó (p_old)
+        en cada banda vs. la ganancia real — si p_old sistemáticamente
+        queda por encima de la tasa de acierto real, el modelo está mal
+        calibrado (demasiado confiado en sí mismo), independiente de qué
+        feed de precio use."""
+        if not self.conn:
+            return {}
+        try:
+            with self.conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute("""
+                    SELECT
+                        actual_outcome, old_model_raw_side, p_old,
+                        polymarket_up_price, polymarket_down_price,
+                        twap60_open, twap60_now
+                    FROM shadow_decisions
+                    WHERE resolved_at IS NOT NULL AND NOT data_gap
+                      AND old_model_raw_side IS NOT NULL
+                """)
+                rows = cur.fetchall()
+        except Exception as e:
+            logger.error(f"Calibration query error: {e}")
+            return {}
+
+        def breakeven(price, fee=0.07):
+            return price / (price + (1 - fee) * (1 - price))
+
+        bands = [(0.0, 0.45), (0.45, 0.55), (0.55, 0.65), (0.65, 0.75), (0.75, 0.85), (0.85, 1.01)]
+        band_reports = []
+        for lo, hi in bands:
+            old_n = old_correct = twap_n = twap_correct = 0
+            prices, p_olds = [], []
+            for row in rows:
+                side = row["old_model_raw_side"]
+                price = row["polymarket_up_price"] if side == "UP" else row["polymarket_down_price"]
+                if price is None or not (lo <= price < hi):
+                    continue
+                old_n += 1
+                prices.append(price)
+                if row["p_old"] is not None:
+                    p_olds.append(row["p_old"])
+                if side == row["actual_outcome"]:
+                    old_correct += 1
+                if row["twap60_now"] is not None and row["twap60_open"] is not None:
+                    diff = row["twap60_now"] - row["twap60_open"]
+                    twap_side = "UP" if diff > 0 else ("DOWN" if diff < 0 else None)
+                    if twap_side:
+                        twap_n += 1
+                        if twap_side == row["actual_outcome"]:
+                            twap_correct += 1
+            if old_n == 0:
+                continue
+            avg_price = sum(prices) / len(prices)
+            be = breakeven(avg_price)
+            old_wr = old_correct / old_n
+            band_reports.append({
+                "band": f"{lo:.2f}-{hi:.2f}",
+                "avg_price": round(avg_price, 3),
+                "breakeven_needed": round(be, 3),
+                "n": old_n,
+                "old_model_win_rate": round(old_wr, 3),
+                "old_model_avg_theoretical_p": round(sum(p_olds) / len(p_olds), 3) if p_olds else None,
+                "old_model_beats_breakeven": old_wr > be,
+                "twap60_n": twap_n,
+                "twap60_win_rate": round(twap_correct / twap_n, 3) if twap_n else None,
+                "twap60_beats_breakeven": (twap_correct / twap_n > be) if twap_n else None,
+            })
+        return {"bands": band_reports, "total_n": len(rows)}
+
 
 _logger_instance = ShadowLogger()
 

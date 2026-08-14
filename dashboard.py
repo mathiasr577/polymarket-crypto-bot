@@ -219,6 +219,34 @@ HTML = """
 </div>
 {% endif %}
 
+{% if shadow_calibration and shadow_calibration.bands %}
+<div class="section">
+  <h2>💸 ¿Dónde está la fuga? Acierto real vs. breakeven, por banda de precio</h2>
+  <div class="sublabel" style="margin-bottom:8px;">Con 7% de fee, el breakeven sube rápido con el precio — un modelo puede acertar mucho y aun así perder si compra caro.</div>
+  <table>
+    <tr>
+      <th>Precio pagado</th><th>Breakeven necesario</th><th>n</th>
+      <th>Modelo viejo: acierto real</th><th>Modelo viejo: p. teórica</th><th>¿Le gana al breakeven?</th>
+      <th>TWAP60: acierto real</th><th>¿Le gana al breakeven?</th>
+    </tr>
+    {% for b in shadow_calibration.bands %}
+    <tr>
+      <td>{{ b.band }} (avg {{ "%.2f"|format(b.avg_price) }})</td>
+      <td>{{ "%.0f"|format(b.breakeven_needed * 100) }}%</td>
+      <td>{{ b.n }}</td>
+      <td class="{{ 'green' if b.old_model_beats_breakeven else 'red' }}">{{ "%.0f"|format(b.old_model_win_rate * 100) }}%</td>
+      <td class="gray">{{ "%.0f"|format(b.old_model_avg_theoretical_p * 100) if b.old_model_avg_theoretical_p else '—' }}%</td>
+      <td>{{ '✅' if b.old_model_beats_breakeven else '❌' }}</td>
+      <td class="{{ 'green' if b.twap60_beats_breakeven else 'red' if b.twap60_beats_breakeven == false else 'gray' }}">
+        {{ "%.0f"|format(b.twap60_win_rate * 100) if b.twap60_win_rate is not none else '—' }}%
+      </td>
+      <td>{{ '✅' if b.twap60_beats_breakeven else ('❌' if b.twap60_beats_breakeven == false else '—') }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+</div>
+{% endif %}
+
 {% if prices %}
 <div class="section">
   <h2>💹 Precios en vivo</h2>
@@ -349,7 +377,7 @@ HTML = """
 </html>
 """
 
-def create_dashboard(get_stats_fn, get_prices_fn, get_markets_fn=None, mode="PAPER TRADING", get_shadow_stats_fn=None, get_shadow_backtest_fn=None):
+def create_dashboard(get_stats_fn, get_prices_fn, get_markets_fn=None, mode="PAPER TRADING", get_shadow_stats_fn=None, get_shadow_backtest_fn=None, get_shadow_calibration_fn=None):
     @app.route("/")
     def index():
         stats = get_stats_fn()
@@ -357,6 +385,7 @@ def create_dashboard(get_stats_fn, get_prices_fn, get_markets_fn=None, mode="PAP
         markets = get_markets_fn() if get_markets_fn else []
         shadow_stats = get_shadow_stats_fn() if get_shadow_stats_fn else None
         shadow_backtest = get_shadow_backtest_fn() if get_shadow_backtest_fn else None
+        shadow_calibration = get_shadow_calibration_fn() if get_shadow_calibration_fn else None
 
         # Defaults para nuevas métricas
         stats.setdefault("cash_balance", 0.0)
@@ -398,6 +427,7 @@ def create_dashboard(get_stats_fn, get_prices_fn, get_markets_fn=None, mode="PAP
             mode=mode,
             shadow_stats=shadow_stats,
             shadow_backtest=shadow_backtest,
+            shadow_calibration=shadow_calibration,
             now=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
         )
 
@@ -412,6 +442,10 @@ def create_dashboard(get_stats_fn, get_prices_fn, get_markets_fn=None, mode="PAP
     @app.route("/api/shadow-backtest")
     def api_shadow_backtest():
         return jsonify(get_shadow_backtest_fn() if get_shadow_backtest_fn else {})
+
+    @app.route("/api/shadow-calibration")
+    def api_shadow_calibration():
+        return jsonify(get_shadow_calibration_fn() if get_shadow_calibration_fn else {})
 
     @app.route("/health")
     def health():
