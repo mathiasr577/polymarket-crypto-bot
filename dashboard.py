@@ -377,7 +377,7 @@ HTML = """
 </html>
 """
 
-def create_dashboard(get_stats_fn, get_prices_fn, get_markets_fn=None, mode="PAPER TRADING", get_shadow_stats_fn=None, get_shadow_backtest_fn=None, get_shadow_calibration_fn=None, get_arb_stats_fn=None):
+def create_dashboard(get_stats_fn, get_prices_fn, get_markets_fn=None, mode="PAPER TRADING", get_shadow_stats_fn=None, get_shadow_backtest_fn=None, get_shadow_calibration_fn=None, get_arb_stats_fn=None, get_shadow_calib_curve_fn=None, get_shadow_weekday_fn=None, get_shadow_lead_fn=None):
     @app.route("/")
     def index():
         stats = get_stats_fn()
@@ -450,6 +450,18 @@ def create_dashboard(get_stats_fn, get_prices_fn, get_markets_fn=None, mode="PAP
     @app.route("/api/arb-stats")
     def api_arb_stats():
         return jsonify(get_arb_stats_fn() if get_arb_stats_fn else {})
+
+    @app.route("/api/shadow-calibration-curve")
+    def api_shadow_calib_curve():
+        return jsonify(get_shadow_calib_curve_fn() if get_shadow_calib_curve_fn else {})
+
+    @app.route("/api/shadow-weekday")
+    def api_shadow_weekday():
+        return jsonify(get_shadow_weekday_fn() if get_shadow_weekday_fn else {})
+
+    @app.route("/api/shadow-lead")
+    def api_shadow_lead():
+        return jsonify(get_shadow_lead_fn() if get_shadow_lead_fn else {})
 
     @app.route("/health")
     def health():

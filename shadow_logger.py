@@ -528,6 +528,110 @@ class ShadowLogger:
             })
         return {"bands": band_reports, "total_n": len(rows)}
 
+    def get_probability_calibration(self) -> dict:
+        """Diagrama de confiabilidad clásico: agrupa por la probabilidad
+        TEÓRICA que el modelo se auto-asignó (p_old, la fórmula de campana
+        de Gauss) y compara contra el acierto EMPÍRICO real en cada grupo.
+        Si p_old sistemáticamente queda por encima del acierto real, el
+        modelo está sobreconfiado — toma posiciones creyendo tener más edge
+        del que realmente tiene, independiente de qué feed de precio use.
+        Confirmado como patrón conocido en la literatura de calibración de
+        modelos: la sobreconfianza empuja a tomar posiciones agresivas con
+        costos de transacción (fee, en nuestro caso) que en la realidad no
+        se justifican."""
+        if not self.conn:
+            return {}
+        try:
+            with self.conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute("""
+                    SELECT
+                        WIDTH_BUCKET(p_old, 0.5, 0.95, 9) AS bucket,
+                        COUNT(*) AS n,
+                        AVG(p_old) AS avg_theoretical_p,
+                        COUNT(*) FILTER (WHERE old_model_raw_side = actual_outcome)::float
+                            / COUNT(*) AS empirical_win_rate
+                    FROM shadow_decisions
+                    WHERE resolved_at IS NOT NULL AND NOT data_gap
+                      AND old_model_raw_side IS NOT NULL AND p_old IS NOT NULL
+                    GROUP BY bucket
+                    ORDER BY bucket
+                """)
+                rows = [dict(r) for r in cur.fetchall()]
+                for r in rows:
+                    r["avg_theoretical_p"] = round(r["avg_theoretical_p"], 3)
+                    r["empirical_win_rate"] = round(r["empirical_win_rate"], 3)
+                    r["overconfident"] = r["avg_theoretical_p"] > r["empirical_win_rate"]
+                return {"buckets": rows}
+        except Exception as e:
+            logger.error(f"Calibration curve error: {e}")
+            return {}
+
+    def get_weekday_weekend_report(self) -> dict:
+        """Chequea con datos propios la hipótesis de que el fin de semana
+        rinde peor por spreads más anchos (volumen institucional de cripto
+        cae 20-40% el fin de semana, según investigación externa — ver
+        conversación). Compara precio promedio pagado y acierto real entre
+        semana vs. fin de semana, para el mismo lado que el modelo viejo
+        eligió."""
+        if not self.conn:
+            return {}
+        try:
+            with self.conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute("""
+                    SELECT
+                        (EXTRACT(DOW FROM decision_timestamp) IN (0, 6)) AS is_weekend,
+                        COUNT(*) AS n,
+                        AVG(CASE WHEN old_model_raw_side = 'UP' THEN polymarket_up_price ELSE polymarket_down_price END) AS avg_price_paid,
+                        COUNT(*) FILTER (WHERE old_model_raw_side = actual_outcome)::float / COUNT(*) AS win_rate
+                    FROM shadow_decisions
+                    WHERE resolved_at IS NOT NULL AND NOT data_gap AND old_model_raw_side IS NOT NULL
+                    GROUP BY is_weekend
+                """)
+                rows = [dict(r) for r in cur.fetchall()]
+                for r in rows:
+                    r["label"] = "fin de semana" if r["is_weekend"] else "entre semana"
+                    r["avg_price_paid"] = round(r["avg_price_paid"], 3) if r["avg_price_paid"] else None
+                    r["win_rate"] = round(r["win_rate"], 3)
+                return {"rows": rows}
+        except Exception as e:
+            logger.error(f"Weekday/weekend report error: {e}")
+            return {}
+
+    def get_lead_signal_report(self) -> dict:
+        """Prueba la hipótesis del 'D_lead' que quedó pendiente desde el
+        principio: como TWAP es una ventana suavizada, el spot de Chainlink
+        podría adelantarse a hacia dónde se mueve el TWAP dentro de la misma
+        ventana. Si D_lead = spot_now - twap60_now predice hacia dónde se
+        mueve el TWAP DESPUÉS (twap60_close - twap60_now), es una señal
+        predictiva genuina y distinta de "¿el TWAP ya es preciso?" (eso ya
+        está confirmado en shadow-stats). Si no le pega mejor que una
+        moneda al aire, la hipótesis del lead no se sostiene y no vale la
+        pena construir nada sobre ella."""
+        if not self.conn:
+            return {}
+        try:
+            with self.conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute("""
+                    SELECT
+                        COUNT(*) AS n,
+                        COUNT(*) FILTER (
+                            WHERE SIGN(chainlink_spot_now - twap60_now) = SIGN(twap60_close - twap60_now)
+                              AND chainlink_spot_now != twap60_now AND twap60_close != twap60_now
+                        ) AS lead_predicts_twap_move,
+                        COUNT(*) FILTER (
+                            WHERE (CASE WHEN chainlink_spot_now > twap60_now THEN 'UP'
+                                        WHEN chainlink_spot_now < twap60_now THEN 'DOWN' END) = actual_outcome
+                        ) AS lead_predicts_actual_outcome
+                    FROM shadow_decisions
+                    WHERE resolved_at IS NOT NULL AND NOT data_gap
+                      AND chainlink_spot_now IS NOT NULL AND twap60_now IS NOT NULL AND twap60_close IS NOT NULL
+                """)
+                row = dict(cur.fetchone())
+                return row
+        except Exception as e:
+            logger.error(f"Lead signal report error: {e}")
+            return {}
+
 
 _logger_instance = ShadowLogger()
 

@@ -315,6 +315,9 @@ def main():
         get_shadow_backtest_fn=(get_shadow_logger().get_decision_time_backtest if config.SHADOW_MODE_ENABLED else None),
         get_shadow_calibration_fn=(get_shadow_logger().get_calibration_report if config.SHADOW_MODE_ENABLED else None),
         get_arb_stats_fn=get_scanner().get_arb_stats,
+        get_shadow_calib_curve_fn=(get_shadow_logger().get_probability_calibration if config.SHADOW_MODE_ENABLED else None),
+        get_shadow_weekday_fn=(get_shadow_logger().get_weekday_weekend_report if config.SHADOW_MODE_ENABLED else None),
+        get_shadow_lead_fn=(get_shadow_logger().get_lead_signal_report if config.SHADOW_MODE_ENABLED else None),
     )
 
     flask_app.run(host="0.0.0.0", port=config.PORT)
