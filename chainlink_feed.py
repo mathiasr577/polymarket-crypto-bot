@@ -119,6 +119,7 @@ class ChainlinkFeed:
     def _run_forever(self):
         backoff = 1
         while self._running:
+            connect_started_at = time.time()
             try:
                 self._ws = websocket.WebSocketApp(
                     RTDS_URL,
@@ -135,6 +136,14 @@ class ChainlinkFeed:
                 self._connected = False
             if not self._running:
                 return
+
+            # Si la conexión duró un rato (no fue un crash-loop inmediato),
+            # resetear el backoff — si no, esto solo crecía para siempre
+            # (1s, 2s, 4s... 30s) sin volver nunca a 1s, aunque cada
+            # desconexión fuera un evento aislado horas después de la
+            # anterior. Detectado revisando logs reales de producción.
+            if time.time() - connect_started_at > 60:
+                backoff = 1
             logger.warning(f"ChainlinkFeed disconnected — reconnecting in {backoff}s")
             time.sleep(backoff)
             backoff = min(backoff * 2, 30)
