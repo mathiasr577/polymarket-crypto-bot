@@ -118,6 +118,10 @@ def generate_signal(indicators: dict, market: dict) -> dict:
         "entry_price": None,
         "model_prob": None,
         "z": None,  # expuesto para el shadow-mode logger (comparar contra el modelo TWAP)
+        "raw_side": None,  # hacia dónde se inclina el modelo AUNQUE termine bloqueado —
+                            # "side" solo se llena si pasa todos los filtros (precio, edge),
+                            # así que por sí solo no sirve para comparar contra una señal
+                            # cruda (TWAP delta) sobre la misma población de mercados.
     }
 
     if indicators is None:
@@ -176,6 +180,7 @@ def generate_signal(indicators: dict, market: dict) -> dict:
 
     best_side = "UP" if p_up >= 0.5 else "DOWN"
     p_model = p_up if best_side == "UP" else (1 - p_up)
+    result["raw_side"] = best_side
 
     reasons = [
         f"z={z:+.2f}{drift_note} delta={delta*100:+.3f}% sigma_rem={sigma_remaining*100:.3f}% "

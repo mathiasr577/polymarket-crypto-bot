@@ -174,22 +174,23 @@ HTML = """
 
 {% if shadow_backtest and shadow_backtest.n %}
 <div class="section">
-  <h2>🥊 Backtest: modelo viejo (Kraken) vs. señal TWAP, mismo momento de decisión</h2>
+  <h2>🥊 Backtest: modelo viejo vs. señal TWAP, mismo momento de decisión</h2>
+  <div class="sublabel" style="margin-bottom:10px;">Comparación justa (misma población de mercados, no solo los que el modelo viejo eligió tradear):</div>
   <div class="grid">
     <div class="card">
-      <div class="label">Modelo viejo (en vivo hoy)</div>
-      <div class="value">{{ "%.0f"|format(shadow_backtest.old_model_correct / shadow_backtest.n_old_model * 100 if shadow_backtest.n_old_model else 0) }}%</div>
-      <div class="sublabel">{{ shadow_backtest.n_old_model }} decisiones</div>
+      <div class="label">Inclinación cruda del modelo viejo</div>
+      <div class="value">{{ "%.0f"|format(shadow_backtest.old_model_raw_correct / shadow_backtest.n_old_model_raw * 100 if shadow_backtest.n_old_model_raw else 0) }}%</div>
+      <div class="sublabel">{{ shadow_backtest.n_old_model_raw }} mercados (incluye bloqueados)</div>
     </div>
     <div class="card">
       <div class="label">Delta TWAP 30s (open→now)</div>
-      <div class="value {{ 'green' if shadow_backtest.n_twap30 and shadow_backtest.twap30_correct / shadow_backtest.n_twap30 > shadow_backtest.old_model_correct / shadow_backtest.n_old_model else '' }}">
+      <div class="value {{ 'green' if shadow_backtest.n_twap30 and shadow_backtest.n_old_model_raw and shadow_backtest.twap30_correct / shadow_backtest.n_twap30 > shadow_backtest.old_model_raw_correct / shadow_backtest.n_old_model_raw else '' }}">
         {{ "%.0f"|format(shadow_backtest.twap30_correct / shadow_backtest.n_twap30 * 100 if shadow_backtest.n_twap30 else 0) }}%
       </div>
     </div>
     <div class="card">
       <div class="label">Delta TWAP 60s (open→now)</div>
-      <div class="value {{ 'green' if shadow_backtest.n_twap60 and shadow_backtest.twap60_correct / shadow_backtest.n_twap60 > shadow_backtest.old_model_correct / shadow_backtest.n_old_model else '' }}">
+      <div class="value {{ 'green' if shadow_backtest.n_twap60 and shadow_backtest.n_old_model_raw and shadow_backtest.twap60_correct / shadow_backtest.n_twap60 > shadow_backtest.old_model_raw_correct / shadow_backtest.n_old_model_raw else '' }}">
         {{ "%.0f"|format(shadow_backtest.twap60_correct / shadow_backtest.n_twap60 * 100 if shadow_backtest.n_twap60 else 0) }}%
       </div>
     </div>
@@ -200,7 +201,12 @@ HTML = """
   </div>
   <div class="divider"></div>
   <div class="stat-row">
-    <span class="stat-label">Cuando TWAP60 y el modelo viejo NO coinciden en el lado ({{ shadow_backtest.disagree_n }} casos):</span>
+    <span class="stat-label">Filtro estricto del modelo viejo (solo cuando decide tradear, precio+edge OK)</span>
+    <span class="stat-val">{{ "%.0f"|format(shadow_backtest.old_model_filtered_correct / shadow_backtest.n_old_model_filtered * 100 if shadow_backtest.n_old_model_filtered else 0) }}% ({{ shadow_backtest.n_old_model_filtered }} casos)</span>
+  </div>
+  <div class="divider"></div>
+  <div class="stat-row">
+    <span class="stat-label">Cuando TWAP60 y la inclinación cruda del modelo viejo NO coinciden ({{ shadow_backtest.disagree_n }} casos):</span>
   </div>
   <div class="stat-row">
     <span class="stat-label">→ acertó TWAP60</span>

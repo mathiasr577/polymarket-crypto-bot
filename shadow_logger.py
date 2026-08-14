@@ -77,6 +77,7 @@ CREATE TABLE IF NOT EXISTS shadow_decisions (
 
     sigma FLOAT,
     z_old FLOAT,
+    old_model_raw_side TEXT,
     p_old FLOAT,
     old_model_side TEXT,
 
@@ -90,6 +91,11 @@ CREATE TABLE IF NOT EXISTS shadow_decisions (
     predicted_winner_chainlink_spot TEXT,
     predicted_winner_kraken TEXT
 );
+
+-- CREATE TABLE IF NOT EXISTS no altera una tabla que ya existe — esta
+-- columna se agregó después del deploy inicial, así que hace falta
+-- migrarla explícitamente en tablas viejas.
+ALTER TABLE shadow_decisions ADD COLUMN IF NOT EXISTS old_model_raw_side TEXT;
 """
 
 
@@ -233,6 +239,7 @@ class ShadowLogger:
 
             "sigma": _safe(indicators.get("vol_per_sqrt_sec")),
             "z_old": _safe(signal.get("z")),
+            "old_model_raw_side": signal.get("raw_side"),
             "p_old": _safe(signal.get("model_prob")),
             "old_model_side": signal.get("side"),
 
@@ -370,12 +377,24 @@ class ShadowLogger:
         relevante para trading: si en el momento de la DECISIÓN (T-120 a
         T-55s, antes de saber el cierre) el delta del TWAP acumulado hasta
         ese instante (twap_now - twap_open) ya apuntaba al lado correcto,
-        comparado contra lo que el modelo viejo (Kraken + z-score + drift +
-        dampener) realmente predijo en esos mismos mercados.
+        comparado contra lo que el modelo viejo predijo en esos mismos
+        mercados.
 
-        Incluye además el desglose de cuando TWAP60 y el modelo viejo
-        DISCREPAN en el lado — ahí es donde importa saber si el TWAP aporta
-        información nueva o si es redundante con lo que ya teníamos."""
+        Ojo con esto: "old_model_side" solo se llena cuando el modelo viejo
+        pasó TODOS sus filtros (precio, edge) y decidió tradear — es un
+        subconjunto chico y auto-seleccionado (sus casos "más seguros"), muy
+        distinto en tamaño a TWAP/Kraken evaluados sobre TODOS los mercados.
+        Comparar 71% (n=56, filtrado) contra 81% (n=300, sin filtrar) no es
+        justo. Por eso también se usa "old_model_raw_side": hacia dónde se
+        inclina el modelo SIEMPRE, haya pasado el filtro o no — con eso sí
+        se compara manzanas con manzanas, misma población que TWAP/Kraken.
+        old_model_side/old_model_correct se mantienen aparte como métrica de
+        "qué tan bien elige el modelo viejo SUS propios mejores casos", que
+        es una pregunta distinta y también válida.
+
+        Incluye además el desglose de cuando TWAP60 y la inclinación cruda
+        del modelo viejo DISCREPAN en el lado — ahí es donde importa saber
+        si el TWAP aporta información nueva o es redundante con Kraken."""
         if not self.conn:
             return {}
         try:
@@ -385,6 +404,7 @@ class ShadowLogger:
                         SELECT
                             actual_outcome,
                             old_model_side,
+                            old_model_raw_side,
                             CASE WHEN twap30_now > twap30_open THEN 'UP'
                                  WHEN twap30_now < twap30_open THEN 'DOWN' END AS twap30_side,
                             CASE WHEN twap60_now > twap60_open THEN 'UP'
@@ -396,8 +416,12 @@ class ShadowLogger:
                     )
                     SELECT
                         COUNT(*) AS n,
-                        COUNT(*) FILTER (WHERE old_model_side IS NOT NULL) AS n_old_model,
-                        COUNT(*) FILTER (WHERE old_model_side = actual_outcome) AS old_model_correct,
+                        -- filtro estricto del modelo viejo (sus casos elegidos, n chico)
+                        COUNT(*) FILTER (WHERE old_model_side IS NOT NULL) AS n_old_model_filtered,
+                        COUNT(*) FILTER (WHERE old_model_side = actual_outcome) AS old_model_filtered_correct,
+                        -- inclinación cruda del modelo viejo, misma población que TWAP/Kraken
+                        COUNT(*) FILTER (WHERE old_model_raw_side IS NOT NULL) AS n_old_model_raw,
+                        COUNT(*) FILTER (WHERE old_model_raw_side = actual_outcome) AS old_model_raw_correct,
                         COUNT(*) FILTER (WHERE twap30_side IS NOT NULL) AS n_twap30,
                         COUNT(*) FILTER (WHERE twap30_side = actual_outcome) AS twap30_correct,
                         COUNT(*) FILTER (WHERE twap60_side IS NOT NULL) AS n_twap60,
@@ -405,16 +429,16 @@ class ShadowLogger:
                         COUNT(*) FILTER (WHERE kraken_raw_side IS NOT NULL) AS n_kraken_raw,
                         COUNT(*) FILTER (WHERE kraken_raw_side = actual_outcome) AS kraken_raw_correct,
                         COUNT(*) FILTER (
-                            WHERE twap60_side IS NOT NULL AND old_model_side IS NOT NULL
-                              AND twap60_side != old_model_side
+                            WHERE twap60_side IS NOT NULL AND old_model_raw_side IS NOT NULL
+                              AND twap60_side != old_model_raw_side
                         ) AS disagree_n,
                         COUNT(*) FILTER (
-                            WHERE twap60_side IS NOT NULL AND old_model_side IS NOT NULL
-                              AND twap60_side != old_model_side AND twap60_side = actual_outcome
+                            WHERE twap60_side IS NOT NULL AND old_model_raw_side IS NOT NULL
+                              AND twap60_side != old_model_raw_side AND twap60_side = actual_outcome
                         ) AS disagree_twap60_right,
                         COUNT(*) FILTER (
-                            WHERE twap60_side IS NOT NULL AND old_model_side IS NOT NULL
-                              AND twap60_side != old_model_side AND old_model_side = actual_outcome
+                            WHERE twap60_side IS NOT NULL AND old_model_raw_side IS NOT NULL
+                              AND twap60_side != old_model_raw_side AND old_model_raw_side = actual_outcome
                         ) AS disagree_old_right
                     FROM base
                 """)
