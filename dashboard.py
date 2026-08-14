@@ -172,6 +172,47 @@ HTML = """
 </div>
 {% endif %}
 
+{% if shadow_backtest and shadow_backtest.n %}
+<div class="section">
+  <h2>🥊 Backtest: modelo viejo (Kraken) vs. señal TWAP, mismo momento de decisión</h2>
+  <div class="grid">
+    <div class="card">
+      <div class="label">Modelo viejo (en vivo hoy)</div>
+      <div class="value">{{ "%.0f"|format(shadow_backtest.old_model_correct / shadow_backtest.n_old_model * 100 if shadow_backtest.n_old_model else 0) }}%</div>
+      <div class="sublabel">{{ shadow_backtest.n_old_model }} decisiones</div>
+    </div>
+    <div class="card">
+      <div class="label">Delta TWAP 30s (open→now)</div>
+      <div class="value {{ 'green' if shadow_backtest.n_twap30 and shadow_backtest.twap30_correct / shadow_backtest.n_twap30 > shadow_backtest.old_model_correct / shadow_backtest.n_old_model else '' }}">
+        {{ "%.0f"|format(shadow_backtest.twap30_correct / shadow_backtest.n_twap30 * 100 if shadow_backtest.n_twap30 else 0) }}%
+      </div>
+    </div>
+    <div class="card">
+      <div class="label">Delta TWAP 60s (open→now)</div>
+      <div class="value {{ 'green' if shadow_backtest.n_twap60 and shadow_backtest.twap60_correct / shadow_backtest.n_twap60 > shadow_backtest.old_model_correct / shadow_backtest.n_old_model else '' }}">
+        {{ "%.0f"|format(shadow_backtest.twap60_correct / shadow_backtest.n_twap60 * 100 if shadow_backtest.n_twap60 else 0) }}%
+      </div>
+    </div>
+    <div class="card">
+      <div class="label">Delta Kraken spot crudo (sin drift/dampener)</div>
+      <div class="value">{{ "%.0f"|format(shadow_backtest.kraken_raw_correct / shadow_backtest.n_kraken_raw * 100 if shadow_backtest.n_kraken_raw else 0) }}%</div>
+    </div>
+  </div>
+  <div class="divider"></div>
+  <div class="stat-row">
+    <span class="stat-label">Cuando TWAP60 y el modelo viejo NO coinciden en el lado ({{ shadow_backtest.disagree_n }} casos):</span>
+  </div>
+  <div class="stat-row">
+    <span class="stat-label">→ acertó TWAP60</span>
+    <span class="stat-val yellow">{{ "%.0f"|format(shadow_backtest.disagree_twap60_right / shadow_backtest.disagree_n * 100 if shadow_backtest.disagree_n else 0) }}%</span>
+  </div>
+  <div class="stat-row">
+    <span class="stat-label">→ acertó el modelo viejo</span>
+    <span class="stat-val yellow">{{ "%.0f"|format(shadow_backtest.disagree_old_right / shadow_backtest.disagree_n * 100 if shadow_backtest.disagree_n else 0) }}%</span>
+  </div>
+</div>
+{% endif %}
+
 {% if prices %}
 <div class="section">
   <h2>💹 Precios en vivo</h2>
@@ -302,13 +343,14 @@ HTML = """
 </html>
 """
 
-def create_dashboard(get_stats_fn, get_prices_fn, get_markets_fn=None, mode="PAPER TRADING", get_shadow_stats_fn=None):
+def create_dashboard(get_stats_fn, get_prices_fn, get_markets_fn=None, mode="PAPER TRADING", get_shadow_stats_fn=None, get_shadow_backtest_fn=None):
     @app.route("/")
     def index():
         stats = get_stats_fn()
         prices = get_prices_fn()
         markets = get_markets_fn() if get_markets_fn else []
         shadow_stats = get_shadow_stats_fn() if get_shadow_stats_fn else None
+        shadow_backtest = get_shadow_backtest_fn() if get_shadow_backtest_fn else None
 
         # Defaults para nuevas métricas
         stats.setdefault("cash_balance", 0.0)
@@ -349,6 +391,7 @@ def create_dashboard(get_stats_fn, get_prices_fn, get_markets_fn=None, mode="PAP
             markets=markets,
             mode=mode,
             shadow_stats=shadow_stats,
+            shadow_backtest=shadow_backtest,
             now=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
         )
 
@@ -359,6 +402,10 @@ def create_dashboard(get_stats_fn, get_prices_fn, get_markets_fn=None, mode="PAP
     @app.route("/api/shadow-stats")
     def api_shadow_stats():
         return jsonify(get_shadow_stats_fn() if get_shadow_stats_fn else {})
+
+    @app.route("/api/shadow-backtest")
+    def api_shadow_backtest():
+        return jsonify(get_shadow_backtest_fn() if get_shadow_backtest_fn else {})
 
     @app.route("/health")
     def health():

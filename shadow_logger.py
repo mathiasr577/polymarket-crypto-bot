@@ -363,6 +363,66 @@ class ShadowLogger:
             logger.error(f"Shadow stats error: {e}")
             return {}
 
+    def get_decision_time_backtest(self) -> dict:
+        """A diferencia de get_validation_stats() (que mide si el TWAP de
+        CIERRE reconstruye el ganador real — la prueba de que entendemos
+        bien el mecanismo de resolución), esto mide algo distinto y más
+        relevante para trading: si en el momento de la DECISIÓN (T-120 a
+        T-55s, antes de saber el cierre) el delta del TWAP acumulado hasta
+        ese instante (twap_now - twap_open) ya apuntaba al lado correcto,
+        comparado contra lo que el modelo viejo (Kraken + z-score + drift +
+        dampener) realmente predijo en esos mismos mercados.
+
+        Incluye además el desglose de cuando TWAP60 y el modelo viejo
+        DISCREPAN en el lado — ahí es donde importa saber si el TWAP aporta
+        información nueva o si es redundante con lo que ya teníamos."""
+        if not self.conn:
+            return {}
+        try:
+            with self.conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute("""
+                    WITH base AS (
+                        SELECT
+                            actual_outcome,
+                            old_model_side,
+                            CASE WHEN twap30_now > twap30_open THEN 'UP'
+                                 WHEN twap30_now < twap30_open THEN 'DOWN' END AS twap30_side,
+                            CASE WHEN twap60_now > twap60_open THEN 'UP'
+                                 WHEN twap60_now < twap60_open THEN 'DOWN' END AS twap60_side,
+                            CASE WHEN kraken_spot_now > kraken_ref_open THEN 'UP'
+                                 WHEN kraken_spot_now < kraken_ref_open THEN 'DOWN' END AS kraken_raw_side
+                        FROM shadow_decisions
+                        WHERE resolved_at IS NOT NULL AND NOT data_gap
+                    )
+                    SELECT
+                        COUNT(*) AS n,
+                        COUNT(*) FILTER (WHERE old_model_side IS NOT NULL) AS n_old_model,
+                        COUNT(*) FILTER (WHERE old_model_side = actual_outcome) AS old_model_correct,
+                        COUNT(*) FILTER (WHERE twap30_side IS NOT NULL) AS n_twap30,
+                        COUNT(*) FILTER (WHERE twap30_side = actual_outcome) AS twap30_correct,
+                        COUNT(*) FILTER (WHERE twap60_side IS NOT NULL) AS n_twap60,
+                        COUNT(*) FILTER (WHERE twap60_side = actual_outcome) AS twap60_correct,
+                        COUNT(*) FILTER (WHERE kraken_raw_side IS NOT NULL) AS n_kraken_raw,
+                        COUNT(*) FILTER (WHERE kraken_raw_side = actual_outcome) AS kraken_raw_correct,
+                        COUNT(*) FILTER (
+                            WHERE twap60_side IS NOT NULL AND old_model_side IS NOT NULL
+                              AND twap60_side != old_model_side
+                        ) AS disagree_n,
+                        COUNT(*) FILTER (
+                            WHERE twap60_side IS NOT NULL AND old_model_side IS NOT NULL
+                              AND twap60_side != old_model_side AND twap60_side = actual_outcome
+                        ) AS disagree_twap60_right,
+                        COUNT(*) FILTER (
+                            WHERE twap60_side IS NOT NULL AND old_model_side IS NOT NULL
+                              AND twap60_side != old_model_side AND old_model_side = actual_outcome
+                        ) AS disagree_old_right
+                    FROM base
+                """)
+                return dict(cur.fetchone())
+        except Exception as e:
+            logger.error(f"Shadow backtest error: {e}")
+            return {}
+
 
 _logger_instance = ShadowLogger()
 
