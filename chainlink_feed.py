@@ -54,6 +54,7 @@ logger = logging.getLogger(__name__)
 
 RTDS_URL = "wss://ws-live-data.polymarket.com"
 PING_INTERVAL_SEC = 5
+STALE_THRESHOLD_SEC = 30  # ver _watchdog_loop
 WINDOW_SECONDS = 300
 OLD_WINDOW_CUTOFF_SEC = 1800  # limpiar ventanas de más de 30 min, igual que price_feed.py
 
@@ -85,7 +86,30 @@ class ChainlinkFeed:
         self._running = True
         self._thread = threading.Thread(target=self._run_forever, daemon=True)
         self._thread.start()
+        threading.Thread(target=self._watchdog_loop, daemon=True).start()
         logger.info("ChainlinkFeed (RTDS) started")
+
+    def _watchdog_loop(self):
+        """Segunda capa de defensa, independiente del blindaje en
+        _on_message: el ritmo normal observado es ~1 mensaje/seg. Si estamos
+        "conectados" pero no llegó nada en STALE_THRESHOLD_SEC, algo mató la
+        recepción sin pasar por on_close (visto en producción: quedaba
+        congelado 15-90+ min). En vez de esperar a diagnosticar la causa
+        exacta, forzamos el cierre para que _run_forever reconecte solo."""
+        while self._running:
+            time.sleep(10)
+            with self._lock:
+                connected = self._connected
+                last_msg = self._last_message_time
+            if connected and last_msg and (time.time() - last_msg > STALE_THRESHOLD_SEC):
+                logger.warning(
+                    f"ChainlinkFeed watchdog: sin mensajes hace {time.time()-last_msg:.0f}s "
+                    f"estando 'conectado' — forzando reconexión"
+                )
+                try:
+                    self._ws.close()
+                except Exception as e:
+                    logger.debug(f"Watchdog close error: {e}")
 
     def stop(self):
         self._running = False
@@ -179,6 +203,25 @@ class ChainlinkFeed:
     # -- mensajes ----------------------------------------------------------
 
     def _on_message(self, ws, message):
+        # TODO cualquier excepción que se escape de este método se propaga
+        # dentro del callback interno de websocket-client. Se observó en
+        # producción (13/14-ago-2026): la conexión seguía "conectada"
+        # (nunca disparaba on_close) pero dejaba de recibir datos frescos
+        # durante 15-90+ minutos seguidos — self._latest quedaba congelado
+        # en el mismo valor mientras twap*_open nunca se llenaba para la
+        # ventana actual. Confirmado con una prueba en vivo de 7 minutos
+        # (391 mensajes, ~330 cambios de valor, sin cortes) que el feed real
+        # SÍ actualiza ~1/seg sin pausas — la causa tiene que ser algo local
+        # que mata el hilo de lectura sin pasar por _on_close. Antes acá
+        # solo se protegía el json.loads(); el resto del procesamiento
+        # (ej. data.get(...) si data no es un dict) podía tirar una
+        # excepción sin capturar. Ahora todo el cuerpo queda blindado.
+        try:
+            self._handle_message(message)
+        except Exception as e:
+            logger.error(f"ChainlinkFeed _on_message crash on {message!r}: {e!r}")
+
+    def _handle_message(self, message):
         if message in ("PONG", "PING"):
             return
         try:
@@ -187,9 +230,12 @@ class ChainlinkFeed:
             logger.debug(f"ChainlinkFeed unparseable message: {message!r} ({e})")
             return
 
+        if not isinstance(data, dict):
+            return
+
         topic = data.get("topic")
         payload = data.get("payload")
-        if not topic or not payload:
+        if not topic or not isinstance(payload, dict):
             return
 
         symbol = payload.get("symbol")
