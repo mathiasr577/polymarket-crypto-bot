@@ -3,11 +3,21 @@ import logging
 import time
 import json
 import threading
+from collections import deque
 from datetime import datetime, timezone
 from config import GAMMA_API, SCAN_INTERVAL
 from signal_engine import ENTRY_WINDOW_START
 
 logger = logging.getLogger(__name__)
+
+# Chequeo pasivo de arbitraje sin dirección: si UP+DOWN < ARB_GAP_THRESHOLD
+# (precios reales de compra del CLOB, no el midpoint), comprando ambos lados
+# se garantiza ganancia pase lo que pase, sin necesidad de predecir nada.
+# 0.97 deja margen razonable bajo el fee del 7% (que en este bot se cobra
+# sobre la ganancia del lado ganador, no sobre el costo total) — no es una
+# ejecución real, solo mide si la oportunidad existe alguna vez en estos
+# mercados antes de invertir tiempo en construir la lógica de ejecución.
+ARB_GAP_THRESHOLD = 0.97
 
 # Ventana en la que se pide el precio BUY real del order book en vez de
 # confiar en outcomePrices de Gamma (que puede estar stale). Debe cubrir al
@@ -27,6 +37,9 @@ class MarketScanner:
         self._lock = threading.Lock()
         self._running = False
         self._thread = None
+        self.arb_checked_count = 0
+        self.arb_gap_count = 0
+        self.arb_gap_samples = deque(maxlen=50)
 
     def start(self):
         self._running = True
@@ -74,6 +87,30 @@ class MarketScanner:
                     for m in found
                 )
             )
+
+    def _check_arb_gap(self, asset, slug, up_price, down_price, seconds_left):
+        """Registra (sin ejecutar nada) si comprar UP+DOWN garantizaría
+        ganancia sin importar el resultado — ver ARB_GAP_THRESHOLD arriba."""
+        self.arb_checked_count += 1
+        total = up_price + down_price
+        if total < ARB_GAP_THRESHOLD:
+            self.arb_gap_count += 1
+            sample = {
+                "asset": asset, "slug": slug, "up_price": up_price,
+                "down_price": down_price, "sum": round(total, 4),
+                "seconds_left": round(seconds_left, 1),
+                "seen_at": datetime.now(timezone.utc).isoformat(),
+            }
+            self.arb_gap_samples.append(sample)
+            logger.info(f"💰 Posible arbitraje sin dirección: {asset.upper()} UP={up_price:.3f} DOWN={down_price:.3f} suma={total:.3f}")
+
+    def get_arb_stats(self) -> dict:
+        return {
+            "checked": self.arb_checked_count,
+            "gaps_found": self.arb_gap_count,
+            "threshold": ARB_GAP_THRESHOLD,
+            "recent_samples": list(self.arb_gap_samples),
+        }
 
     def _get_clob_buy_price(self, token_id: str) -> float | None:
         """Get real executable BUY price from CLOB /price endpoint."""
@@ -143,13 +180,19 @@ class MarketScanner:
                 return None
 
             # For markets close to entry window, get REAL prices from CLOB /price
+            used_real_clob_prices = False
             if -30 < seconds_left < LIVE_PRICE_WINDOW:
                 up_price = self._get_clob_buy_price(tokens["UP"])
                 down_price = self._get_clob_buy_price(tokens["DOWN"])
                 if up_price is None or down_price is None:
                     up_price, down_price = self._get_outcome_prices(m, outcomes)
+                else:
+                    used_real_clob_prices = True
             else:
                 up_price, down_price = self._get_outcome_prices(m, outcomes)
+
+            if used_real_clob_prices:
+                self._check_arb_gap(asset, slug, up_price, down_price, seconds_left)
 
             ref_price = self._get_ref_price(m, event, asset)
 

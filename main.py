@@ -314,6 +314,7 @@ def main():
         get_shadow_stats_fn=(get_shadow_logger().get_validation_stats if config.SHADOW_MODE_ENABLED else None),
         get_shadow_backtest_fn=(get_shadow_logger().get_decision_time_backtest if config.SHADOW_MODE_ENABLED else None),
         get_shadow_calibration_fn=(get_shadow_logger().get_calibration_report if config.SHADOW_MODE_ENABLED else None),
+        get_arb_stats_fn=get_scanner().get_arb_stats,
     )
 
     flask_app.run(host="0.0.0.0", port=config.PORT)
