@@ -456,15 +456,16 @@ class ShadowLogger:
         mente si compra sobre todo en precios donde el breakeven real ya
         pasó ese 72%.
 
-        Agrupa por banda de precio (el precio real pagado por el lado que
-        el modelo eligió) y compara, con datos empíricos reales — no la
-        fórmula teórica de campana de Gauss del modelo — si el modelo viejo
-        y el TWAP60 superan el breakeven en cada banda. También reporta la
-        probabilidad TEÓRICA promedio que el modelo se auto-asignó (p_old)
-        en cada banda vs. la ganancia real — si p_old sistemáticamente
-        queda por encima de la tasa de acierto real, el modelo está mal
-        calibrado (demasiado confiado en sí mismo), independiente de qué
-        feed de precio use."""
+        CORREGIDO (bug detectado en producción): la versión anterior
+        agrupaba SIEMPRE por el precio del lado que eligió el modelo VIEJO,
+        y con esa banda medía el acierto de TWAP60 — es decir, comparaba el
+        acierto de TWAP en mercados donde el precio del lado de TWAP podía
+        ser completamente distinto al banded. Dos poblaciones mezcladas sin
+        querer. Ahora cada modelo se agrupa por SU PROPIO precio, de forma
+        independiente — self-consistent, como ya hacía correctamente
+        simulate_v2_policy() (que es donde se detectó la discrepancia: un
+        77% "corregido" ahí vs. un 72% mal calculado acá para la misma
+        banda, antes de este fix)."""
         if not self.conn:
             return {}
         try:
@@ -476,7 +477,6 @@ class ShadowLogger:
                         twap60_open, twap60_now
                     FROM shadow_decisions
                     WHERE resolved_at IS NOT NULL AND NOT data_gap
-                      AND old_model_raw_side IS NOT NULL
                 """)
                 rows = cur.fetchall()
         except Exception as e:
@@ -490,41 +490,51 @@ class ShadowLogger:
         band_reports = []
         for lo, hi in bands:
             old_n = old_correct = twap_n = twap_correct = 0
-            prices, p_olds = [], []
+            old_prices, twap_prices, p_olds = [], [], []
             for row in rows:
-                side = row["old_model_raw_side"]
-                price = row["polymarket_up_price"] if side == "UP" else row["polymarket_down_price"]
-                if price is None or not (lo <= price < hi):
-                    continue
-                old_n += 1
-                prices.append(price)
-                if row["p_old"] is not None:
-                    p_olds.append(row["p_old"])
-                if side == row["actual_outcome"]:
-                    old_correct += 1
+                old_side = row["old_model_raw_side"]
+                if old_side is not None:
+                    old_price = row["polymarket_up_price"] if old_side == "UP" else row["polymarket_down_price"]
+                    if old_price is not None and lo <= old_price < hi:
+                        old_n += 1
+                        old_prices.append(old_price)
+                        if row["p_old"] is not None:
+                            p_olds.append(row["p_old"])
+                        if old_side == row["actual_outcome"]:
+                            old_correct += 1
+
                 if row["twap60_now"] is not None and row["twap60_open"] is not None:
                     diff = row["twap60_now"] - row["twap60_open"]
                     twap_side = "UP" if diff > 0 else ("DOWN" if diff < 0 else None)
-                    if twap_side:
-                        twap_n += 1
-                        if twap_side == row["actual_outcome"]:
-                            twap_correct += 1
-            if old_n == 0:
+                    if twap_side is not None:
+                        twap_price = row["polymarket_up_price"] if twap_side == "UP" else row["polymarket_down_price"]
+                        if twap_price is not None and lo <= twap_price < hi:
+                            twap_n += 1
+                            twap_prices.append(twap_price)
+                            if twap_side == row["actual_outcome"]:
+                                twap_correct += 1
+
+            if old_n == 0 and twap_n == 0:
                 continue
-            avg_price = sum(prices) / len(prices)
-            be = breakeven(avg_price)
-            old_wr = old_correct / old_n
+
+            old_wr = old_correct / old_n if old_n else None
+            twap_wr = twap_correct / twap_n if twap_n else None
+            old_be = breakeven(sum(old_prices) / len(old_prices)) if old_prices else None
+            twap_be = breakeven(sum(twap_prices) / len(twap_prices)) if twap_prices else None
+
             band_reports.append({
                 "band": f"{lo:.2f}-{hi:.2f}",
-                "avg_price": round(avg_price, 3),
-                "breakeven_needed": round(be, 3),
-                "n": old_n,
-                "old_model_win_rate": round(old_wr, 3),
+                "old_model_avg_price": round(sum(old_prices) / len(old_prices), 3) if old_prices else None,
+                "old_model_breakeven_needed": round(old_be, 3) if old_be else None,
+                "old_model_n": old_n,
+                "old_model_win_rate": round(old_wr, 3) if old_wr is not None else None,
                 "old_model_avg_theoretical_p": round(sum(p_olds) / len(p_olds), 3) if p_olds else None,
-                "old_model_beats_breakeven": old_wr > be,
+                "old_model_beats_breakeven": (old_wr > old_be) if (old_wr is not None and old_be is not None) else None,
+                "twap60_avg_price": round(sum(twap_prices) / len(twap_prices), 3) if twap_prices else None,
+                "twap60_breakeven_needed": round(twap_be, 3) if twap_be else None,
                 "twap60_n": twap_n,
-                "twap60_win_rate": round(twap_correct / twap_n, 3) if twap_n else None,
-                "twap60_beats_breakeven": (twap_correct / twap_n > be) if twap_n else None,
+                "twap60_win_rate": round(twap_wr, 3) if twap_wr is not None else None,
+                "twap60_beats_breakeven": (twap_wr > twap_be) if (twap_wr is not None and twap_be is not None) else None,
             })
         return {"bands": band_reports, "total_n": len(rows)}
 

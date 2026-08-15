@@ -222,21 +222,25 @@ HTML = """
 {% if shadow_calibration and shadow_calibration.bands %}
 <div class="section">
   <h2>💸 ¿Dónde está la fuga? Acierto real vs. breakeven, por banda de precio</h2>
-  <div class="sublabel" style="margin-bottom:8px;">Con 7% de fee, el breakeven sube rápido con el precio — un modelo puede acertar mucho y aun así perder si compra caro.</div>
+  <div class="sublabel" style="margin-bottom:8px;">Con 7% de fee, el breakeven sube rápido con el precio. Cada modelo se agrupa por SU PROPIO precio (lado que él mismo eligió) — no son la misma población de mercados en cada fila.</div>
   <table>
     <tr>
-      <th>Precio pagado</th><th>Breakeven necesario</th><th>n</th>
-      <th>Modelo viejo: acierto real</th><th>Modelo viejo: p. teórica</th><th>¿Le gana al breakeven?</th>
-      <th>TWAP60: acierto real</th><th>¿Le gana al breakeven?</th>
+      <th>Banda</th>
+      <th>Modelo viejo: precio/breakeven</th><th>n</th><th>acierto real</th><th>p. teórica</th><th>¿gana?</th>
+      <th>TWAP60: precio/breakeven</th><th>n</th><th>acierto real</th><th>¿gana?</th>
     </tr>
     {% for b in shadow_calibration.bands %}
     <tr>
-      <td>{{ b.band }} (avg {{ "%.2f"|format(b.avg_price) }})</td>
-      <td>{{ "%.0f"|format(b.breakeven_needed * 100) }}%</td>
-      <td>{{ b.n }}</td>
-      <td class="{{ 'green' if b.old_model_beats_breakeven else 'red' }}">{{ "%.0f"|format(b.old_model_win_rate * 100) }}%</td>
+      <td>{{ b.band }}</td>
+      <td>{{ "%.2f"|format(b.old_model_avg_price) if b.old_model_avg_price else '—' }} / {{ "%.0f"|format(b.old_model_breakeven_needed * 100) if b.old_model_breakeven_needed else 0 }}%</td>
+      <td>{{ b.old_model_n }}</td>
+      <td class="{{ 'green' if b.old_model_beats_breakeven else 'red' if b.old_model_beats_breakeven == false else 'gray' }}">
+        {{ "%.0f"|format(b.old_model_win_rate * 100) if b.old_model_win_rate is not none else '—' }}%
+      </td>
       <td class="gray">{{ "%.0f"|format(b.old_model_avg_theoretical_p * 100) if b.old_model_avg_theoretical_p else '—' }}%</td>
-      <td>{{ '✅' if b.old_model_beats_breakeven else '❌' }}</td>
+      <td>{{ '✅' if b.old_model_beats_breakeven else ('❌' if b.old_model_beats_breakeven == false else '—') }}</td>
+      <td>{{ "%.2f"|format(b.twap60_avg_price) if b.twap60_avg_price else '—' }} / {{ "%.0f"|format(b.twap60_breakeven_needed * 100) if b.twap60_breakeven_needed else 0 }}%</td>
+      <td>{{ b.twap60_n }}</td>
       <td class="{{ 'green' if b.twap60_beats_breakeven else 'red' if b.twap60_beats_breakeven == false else 'gray' }}">
         {{ "%.0f"|format(b.twap60_win_rate * 100) if b.twap60_win_rate is not none else '—' }}%
       </td>
