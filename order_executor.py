@@ -9,8 +9,15 @@ from config import PRIVATE_KEY, FUNDER, CHAIN_ID, CLOB_HOST
 
 logger = logging.getLogger(__name__)
 
-MAX_PRICE = 0.80
-MIN_PRICE = 0.25
+# Esto es un piso/techo de SEGURIDAD (evitar fat-fingers / precios
+# corruptos), no una decisión de estrategia — esa banda le corresponde a
+# cada signal_engine (v1: 0.45-0.80; v2: banda barata <0.55, potencialmente
+# hasta ~0.20). Antes este archivo tenía su propio MIN_PRICE=0.25 que
+# coincidía por casualidad con v1 pero hubiera bloqueado en silencio los
+# trades de v2 en la banda barata si algún día se conecta a plata real —
+# encontrado en revisión de código, corregido antes de que importara.
+MAX_PRICE = 0.98
+MIN_PRICE = 0.02
 
 _client = None
 
