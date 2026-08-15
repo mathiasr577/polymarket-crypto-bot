@@ -41,9 +41,18 @@ logger = logging.getLogger(__name__)
 #
 # Banda favorita: ~96% de acierto, margen fino (+$0.16/trade, ~3.2% de
 # retorno) pero confirmado estable en 3 mediciones independientes seguidas
-# (n=210→385→393) — ya no parece ruido de muestra chica, se activa.
+# (n=210→385→393). El usuario marcó algo importante mirando los números:
+# tratar 0.85-1.00 como una sola banda escondía que el breakeven sube de
+# ~88% a ~98% adentro de ese rango. Sub-dividiéndola (/api/shadow-
+# favorite-detail, 15-ago-2026) se ve que 0.85-0.97 le gana al breakeven
+# con margen real en todos los tramos (+$61 de $63 totales), pero
+# 0.97-0.99 está literalmente empatada con su propio breakeven (98.1%
+# real vs 98.14% necesario) — arriesgar $5 para ganar $0.09 en 104 casos,
+# solo +$2.10 total. FAVORITE_MAX corta esa cola sin filo; 0.99-1.00 tiene
+# muestra insuficiente (n=3) para confiar en cualquier sentido.
 CHEAP_MAX = 0.55
 FAVORITE_MIN = 0.85
+FAVORITE_MAX = 0.97
 MIN_REL_DELTA_CHEAP = 0.0001
 TRADE_FAVORITE_BAND = True
 
@@ -117,8 +126,15 @@ def generate_signal_v2(chainlink_snapshot: dict, market: dict) -> dict:
                 f"< {MIN_REL_DELTA_CHEAP} (ver /api/shadow-filtered-sim)"
             )
             return result
-    elif price >= FAVORITE_MIN:
+    elif FAVORITE_MIN <= price < FAVORITE_MAX:
         band = "favorite"
+    elif price >= FAVORITE_MAX:
+        result["blocked"] = True
+        result["block_reason"] = (
+            f"Price {price:.2f} in favorite band's dead-weight tail "
+            f"(>={FAVORITE_MAX}, breakeven ~empatado, ver /api/shadow-favorite-detail)"
+        )
+        return result
     else:
         result["blocked"] = True
         result["block_reason"] = f"Price {price:.2f} in excluded band (0.55-0.85, sin ventaja probada)"
