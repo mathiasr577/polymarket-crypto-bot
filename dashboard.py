@@ -381,7 +381,7 @@ HTML = """
 </html>
 """
 
-def create_dashboard(get_stats_fn, get_prices_fn, get_markets_fn=None, mode="PAPER TRADING", get_shadow_stats_fn=None, get_shadow_backtest_fn=None, get_shadow_calibration_fn=None, get_arb_stats_fn=None, get_shadow_calib_curve_fn=None, get_shadow_weekday_fn=None, get_shadow_lead_fn=None, get_shadow_v2_sim_fn=None):
+def create_dashboard(get_stats_fn, get_prices_fn, get_markets_fn=None, mode="PAPER TRADING", get_shadow_stats_fn=None, get_shadow_backtest_fn=None, get_shadow_calibration_fn=None, get_arb_stats_fn=None, get_shadow_calib_curve_fn=None, get_shadow_weekday_fn=None, get_shadow_lead_fn=None, get_shadow_v2_sim_fn=None, get_shadow_model_comparison_fn=None):
     @app.route("/")
     def index():
         stats = get_stats_fn()
@@ -470,6 +470,10 @@ def create_dashboard(get_stats_fn, get_prices_fn, get_markets_fn=None, mode="PAP
     @app.route("/api/shadow-v2-sim")
     def api_shadow_v2_sim():
         return jsonify(get_shadow_v2_sim_fn() if get_shadow_v2_sim_fn else {})
+
+    @app.route("/api/shadow-model-comparison")
+    def api_shadow_model_comparison():
+        return jsonify(get_shadow_model_comparison_fn() if get_shadow_model_comparison_fn else {})
 
     @app.route("/health")
     def health():

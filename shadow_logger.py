@@ -642,36 +642,14 @@ class ShadowLogger:
             logger.error(f"Lead signal report error: {e}")
             return {}
 
-    def simulate_v2_policy(self, cheap_max=0.55, favorite_min=0.85,
-                            trade_favorite_band=True, stake=5.0, fee=0.07) -> dict:
-        """Backtest de la política v2 propuesta: tradear el lado que indica
-        TWAP60 (twap60_now vs twap60_open), pero SOLO en bandas de precio
-        que get_calibration_report() ya mostró que le ganan al breakeven —
-        evitando la zona 0.55-0.85 donde ni TWAP ni el modelo viejo
-        funcionan hoy. Corre sobre TODO el historial ya recolectado, con el
-        tamaño de posición y fórmula de fee reales del bot, para dar un
-        número de plata simulada concreto en vez de solo % de acierto.
-
-        No ejecuta nada — es 100% retroactivo sobre datos ya guardados.
-        Reporta también un desglose por banda para poder ver si el
-        resultado está dominado por unos pocos mercados correlacionados
-        (mala señal) o distribuido parejo (buena señal)."""
-        if not self.conn:
-            return {}
-        try:
-            with self.conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                cur.execute("""
-                    SELECT actual_outcome, polymarket_up_price, polymarket_down_price,
-                           twap60_open, twap60_now, decision_timestamp
-                    FROM shadow_decisions
-                    WHERE resolved_at IS NOT NULL AND NOT data_gap
-                      AND twap60_open IS NOT NULL AND twap60_now IS NOT NULL
-                """)
-                rows = cur.fetchall()
-        except Exception as e:
-            logger.error(f"v2 policy simulation query error: {e}")
-            return {}
-
+    def _simulate_policy(self, rows, side_fn, restrict_bands=True,
+                          cheap_max=0.55, favorite_min=0.85,
+                          trade_favorite_band=True, stake=5.0, fee=0.07) -> dict:
+        """Motor genérico de backtest retroactivo — no ejecuta nada, solo
+        recalcula PnL simulado sobre filas ya guardadas. `side_fn(row)`
+        devuelve 'UP'/'DOWN'/None para una fila; el resto (banda de precio,
+        tamaño, fee) es igual para cualquier modelo que se le pase, así la
+        comparación entre modelos es apples-to-apples de verdad."""
         def band_of(price):
             if price < cheap_max:
                 return "cheap"
@@ -684,18 +662,20 @@ class ShadowLogger:
         total_n = 0
         total_wins = 0
         for row in rows:
-            diff = row["twap60_now"] - row["twap60_open"]
-            if diff == 0:
+            side = side_fn(row)
+            if side is None:
                 continue
-            side = "UP" if diff > 0 else "DOWN"
             price = row["polymarket_up_price"] if side == "UP" else row["polymarket_down_price"]
             if price is None or price <= 0 or price >= 1:
                 continue
-            band = band_of(price)
-            if band == "excluded":
-                continue
-            if band == "favorite" and not trade_favorite_band:
-                continue
+            if restrict_bands:
+                band = band_of(price)
+                if band == "excluded":
+                    continue
+                if band == "favorite" and not trade_favorite_band:
+                    continue
+            else:
+                band = "unrestricted"
 
             win = side == row["actual_outcome"]
             pnl = stake * ((1 - price) / price) * (1 - fee) if win else -stake
@@ -724,6 +704,77 @@ class ShadowLogger:
             "total_simulated_pnl": round(total_pnl, 2),
             "avg_pnl_per_trade": round(total_pnl / total_n, 3) if total_n else None,
             "by_band": bands,
+        }
+
+    def _fetch_backtest_rows(self):
+        with self.conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("""
+                SELECT actual_outcome, old_model_raw_side, polymarket_up_price,
+                       polymarket_down_price, twap60_open, twap60_now
+                FROM shadow_decisions
+                WHERE resolved_at IS NOT NULL AND NOT data_gap
+            """)
+            return cur.fetchall()
+
+    def simulate_v2_policy(self, cheap_max=0.55, favorite_min=0.85,
+                            trade_favorite_band=True, stake=5.0, fee=0.07) -> dict:
+        """Backtest de la política v2 propuesta: tradear el lado que indica
+        TWAP60 (twap60_now vs twap60_open), pero SOLO en bandas de precio
+        que get_calibration_report() ya mostró que le ganan al breakeven —
+        evitando la zona 0.55-0.85 donde ni TWAP ni el modelo viejo
+        funcionan hoy."""
+        if not self.conn:
+            return {}
+        try:
+            rows = self._fetch_backtest_rows()
+        except Exception as e:
+            logger.error(f"v2 policy simulation query error: {e}")
+            return {}
+
+        def twap_side(row):
+            if row["twap60_now"] is None or row["twap60_open"] is None:
+                return None
+            diff = row["twap60_now"] - row["twap60_open"]
+            return "UP" if diff > 0 else ("DOWN" if diff < 0 else None)
+
+        return self._simulate_policy(rows, twap_side, restrict_bands=True,
+                                      cheap_max=cheap_max, favorite_min=favorite_min,
+                                      trade_favorite_band=trade_favorite_band,
+                                      stake=stake, fee=fee)
+
+    def get_model_comparison(self, stake=5.0, fee=0.07) -> dict:
+        """La comparación directa que importa: mismo dinero simulado ($5 por
+        apuesta, mismo fee), sobre el MISMO set de mercados, para 3
+        políticas:
+        - old_unrestricted: el modelo viejo, tradeando TODO lo que su propia
+          inclinación cruda elige, sin restricción de banda — así es como
+          viene operando en vivo (aprox, ignorando el filtro de edge extra).
+        - old_restricted: el modelo viejo pero limitado a las mismas bandas
+          "buenas" que usa v2 — para separar "¿el modelo viejo es malo?" de
+          "¿el modelo viejo tradea en el rango de precio equivocado?".
+        - v2 (twap60_restricted): la política nueva propuesta.
+        """
+        if not self.conn:
+            return {}
+        try:
+            rows = self._fetch_backtest_rows()
+        except Exception as e:
+            logger.error(f"Model comparison query error: {e}")
+            return {}
+
+        def old_side(row):
+            return row["old_model_raw_side"]
+
+        def twap_side(row):
+            if row["twap60_now"] is None or row["twap60_open"] is None:
+                return None
+            diff = row["twap60_now"] - row["twap60_open"]
+            return "UP" if diff > 0 else ("DOWN" if diff < 0 else None)
+
+        return {
+            "old_unrestricted": self._simulate_policy(rows, old_side, restrict_bands=False, stake=stake, fee=fee),
+            "old_restricted_same_bands_as_v2": self._simulate_policy(rows, old_side, restrict_bands=True, stake=stake, fee=fee),
+            "v2_twap60_restricted": self._simulate_policy(rows, twap_side, restrict_bands=True, stake=stake, fee=fee),
         }
 
 
