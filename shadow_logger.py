@@ -777,6 +777,104 @@ class ShadowLogger:
             "v2_twap60_restricted": self._simulate_policy(rows, twap_side, restrict_bands=True, stake=stake, fee=fee),
         }
 
+    def get_magnitude_and_agreement_report(self) -> dict:
+        """Dos ideas concretas para subir el acierto de v2 en la banda
+        barata (hoy ~51%), probadas retroactivamente sobre datos ya
+        recolectados — sin esperar más días:
+
+        1. Umbral de magnitud: ¿el delta del TWAP60 (open->now) es más
+           confiable cuando es más grande? Hoy v2 tradea con CUALQUIER
+           delta distinto de cero, incluso un movimiento mínimo que podría
+           ser ruido. Se agrupa por el tamaño relativo del delta
+           (|now-open|/open) en cuartiles y se mide el acierto real en
+           cada uno.
+        2. Acuerdo entre ventanas: ¿es más confiable cuando TWAP30 Y
+           TWAP60 apuntan al MISMO lado, comparado con solo mirar TWAP60?
+           Análogo a la confirmación cruzada que ya usa el modelo viejo,
+           pero entre las dos ventanas TWAP en vez de entre BTC/ETH."""
+        if not self.conn:
+            return {}
+        try:
+            with self.conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute("""
+                    SELECT actual_outcome, polymarket_up_price, polymarket_down_price,
+                           twap30_open, twap30_now, twap60_open, twap60_now
+                    FROM shadow_decisions
+                    WHERE resolved_at IS NOT NULL AND NOT data_gap
+                      AND twap60_open IS NOT NULL AND twap60_now IS NOT NULL
+                """)
+                rows = cur.fetchall()
+        except Exception as e:
+            logger.error(f"Magnitude/agreement report error: {e}")
+            return {}
+
+        def cheap_side_price(row, side):
+            price = row["polymarket_up_price"] if side == "UP" else row["polymarket_down_price"]
+            return price
+
+        # -- 1. Umbral de magnitud (solo banda barata) --
+        mags = []
+        for row in rows:
+            diff = row["twap60_now"] - row["twap60_open"]
+            if diff == 0 or row["twap60_open"] == 0:
+                continue
+            side = "UP" if diff > 0 else "DOWN"
+            price = cheap_side_price(row, side)
+            if price is None or price >= 0.55:
+                continue
+            rel_mag = abs(diff / row["twap60_open"])
+            mags.append((rel_mag, side == row["actual_outcome"]))
+
+        mag_report = []
+        if mags:
+            mags.sort(key=lambda x: x[0])
+            n = len(mags)
+            quartiles = [mags[i * n // 4: (i + 1) * n // 4] for i in range(4)]
+            labels = ["Q1 (más chico)", "Q2", "Q3", "Q4 (más grande)"]
+            for label, q in zip(labels, quartiles):
+                if not q:
+                    continue
+                correct = sum(1 for _, win in q if win)
+                mag_report.append({
+                    "quartile": label,
+                    "n": len(q),
+                    "min_rel_delta": round(q[0][0], 6),
+                    "max_rel_delta": round(q[-1][0], 6),
+                    "win_rate": round(correct / len(q), 3),
+                })
+
+        # -- 2. Acuerdo TWAP30 + TWAP60 (solo banda barata) --
+        agree_n = agree_correct = disagree_n = disagree_correct = 0
+        for row in rows:
+            if row["twap30_open"] is None or row["twap30_now"] is None:
+                continue
+            diff60 = row["twap60_now"] - row["twap60_open"]
+            diff30 = row["twap30_now"] - row["twap30_open"]
+            if diff60 == 0 or diff30 == 0:
+                continue
+            side60 = "UP" if diff60 > 0 else "DOWN"
+            side30 = "UP" if diff30 > 0 else "DOWN"
+            price = cheap_side_price(row, side60)
+            if price is None or price >= 0.55:
+                continue
+            win = side60 == row["actual_outcome"]
+            if side30 == side60:
+                agree_n += 1
+                if win:
+                    agree_correct += 1
+            else:
+                disagree_n += 1
+                if win:
+                    disagree_correct += 1
+
+        return {
+            "magnitude_quartiles_cheap_band": mag_report,
+            "twap30_twap60_agreement_cheap_band": {
+                "agree": {"n": agree_n, "win_rate": round(agree_correct / agree_n, 3) if agree_n else None},
+                "disagree": {"n": disagree_n, "win_rate": round(disagree_correct / disagree_n, 3) if disagree_n else None},
+            },
+        }
+
 
 _logger_instance = ShadowLogger()
 
