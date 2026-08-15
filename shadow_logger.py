@@ -82,6 +82,11 @@ CREATE TABLE IF NOT EXISTS shadow_decisions (
     old_model_side TEXT,
     twap_pressure_integral FLOAT,
     twap_pressure_last_divergence FLOAT,
+    ofi_1s FLOAT,
+    ofi_5s FLOAT,
+    ofi_15s FLOAT,
+    ofi_30s FLOAT,
+    ofi_n_trades_30s INT,
 
     polymarket_up_price FLOAT,
     polymarket_down_price FLOAT,
@@ -100,6 +105,11 @@ CREATE TABLE IF NOT EXISTS shadow_decisions (
 ALTER TABLE shadow_decisions ADD COLUMN IF NOT EXISTS old_model_raw_side TEXT;
 ALTER TABLE shadow_decisions ADD COLUMN IF NOT EXISTS twap_pressure_integral FLOAT;
 ALTER TABLE shadow_decisions ADD COLUMN IF NOT EXISTS twap_pressure_last_divergence FLOAT;
+ALTER TABLE shadow_decisions ADD COLUMN IF NOT EXISTS ofi_1s FLOAT;
+ALTER TABLE shadow_decisions ADD COLUMN IF NOT EXISTS ofi_5s FLOAT;
+ALTER TABLE shadow_decisions ADD COLUMN IF NOT EXISTS ofi_15s FLOAT;
+ALTER TABLE shadow_decisions ADD COLUMN IF NOT EXISTS ofi_30s FLOAT;
+ALTER TABLE shadow_decisions ADD COLUMN IF NOT EXISTS ofi_n_trades_30s INT;
 """
 
 
@@ -179,7 +189,7 @@ class ShadowLogger:
             logger.error(f"ShadowLogger DB error: {e}")
             self.conn = None
 
-    def log_decision(self, market, indicators, signal, chainlink_feed, kraken_window_ts, kraken_ref_open):
+    def log_decision(self, market, indicators, signal, chainlink_feed, kraken_window_ts, kraken_ref_open, order_flow_feed=None):
         if not self.conn:
             return
         market_id = market["id"]
@@ -258,6 +268,19 @@ class ShadowLogger:
             pressure = chainlink_feed.get_pressure(asset, kraken_window_ts)
             row["twap_pressure_integral"] = _safe(pressure.get("integral"))
             row["twap_pressure_last_divergence"] = _safe(pressure.get("last_divergence"))
+
+        # Order flow (Bybit) — trades agresivos reales, no order book
+        # inferido. Ver order_flow_feed.py. Shadow-only por ahora.
+        if order_flow_feed is not None:
+            try:
+                ofi30 = order_flow_feed.get_ofi(asset, 30)
+                row["ofi_1s"] = _safe(order_flow_feed.get_ofi(asset, 1).get("ofi"))
+                row["ofi_5s"] = _safe(order_flow_feed.get_ofi(asset, 5).get("ofi"))
+                row["ofi_15s"] = _safe(order_flow_feed.get_ofi(asset, 15).get("ofi"))
+                row["ofi_30s"] = _safe(ofi30.get("ofi"))
+                row["ofi_n_trades_30s"] = ofi30.get("n_trades")
+            except Exception as e:
+                logger.debug(f"OFI capture error [{asset}]: {e}")
 
         cols = ", ".join(row.keys())
         placeholders = ", ".join(f"%({k})s" for k in row.keys())

@@ -34,6 +34,11 @@ if config.SHADOW_MODE_ENABLED:
     from signal_engine_v2 import generate_signal_v2, ENTRY_WINDOW_START as V2_ENTRY_START, ENTRY_WINDOW_END as V2_ENTRY_END
     from paper_trader_v2 import get_trader_v2
 
+# Order flow de Bybit (trades agresivos reales BTCUSDT/ETHUSDT) — shadow-only,
+# no toca ninguna decisión de trading todavía. Ver order_flow_feed.py.
+if config.SHADOW_MODE_ENABLED:
+    from order_flow_feed import start_order_flow_feed, get_order_flow_feed
+
 # Delta mínimo del activo correlacionado para contar como confirmación cruzada
 CROSS_ASSET_MIN_DELTA = 0.0003
 
@@ -121,13 +126,14 @@ def trading_loop():
     shadow = get_shadow_logger() if config.SHADOW_MODE_ENABLED else None
     chainlink = get_chainlink_feed() if config.SHADOW_MODE_ENABLED else None
     paper_v2 = get_trader_v2() if config.SHADOW_MODE_ENABLED else None
+    order_flow = get_order_flow_feed() if config.SHADOW_MODE_ENABLED else None
 
     logger.info(f"Trading loop started — mode: {'LIVE' if live else 'PAPER'} — warming up 60s...")
     time.sleep(60)
 
     while True:
         try:
-            _tick(scanner, feed, paper, live, shadow, chainlink, paper_v2)
+            _tick(scanner, feed, paper, live, shadow, chainlink, paper_v2, order_flow)
         except Exception as e:
             logger.error(f"Tick error: {e}")
         time.sleep(10)
@@ -155,7 +161,7 @@ def _cross_asset_confirm(feed, asset: str) -> str | None:
     return None
 
 
-def _tick(scanner, feed, paper, live, shadow=None, chainlink=None, paper_v2=None):
+def _tick(scanner, feed, paper, live, shadow=None, chainlink=None, paper_v2=None, order_flow=None):
     resolve_expired(paper)
 
     if paper_v2:
@@ -230,7 +236,7 @@ def _tick(scanner, feed, paper, live, shadow=None, chainlink=None, paper_v2=None
         if shadow and chainlink:
             try:
                 window_ts = int(time.time() // 300) * 300
-                shadow.log_decision(market, indicators, signal, chainlink, window_ts, market.get("ref_price"))
+                shadow.log_decision(market, indicators, signal, chainlink, window_ts, market.get("ref_price"), order_flow_feed=order_flow)
             except Exception as e:
                 logger.debug(f"Shadow log_decision error: {e}")
 
@@ -343,6 +349,7 @@ def main():
     start_scanner()
     if config.SHADOW_MODE_ENABLED:
         start_chainlink_feed()
+        start_order_flow_feed()
 
     t = threading.Thread(target=trading_loop, daemon=True)
     t.start()
