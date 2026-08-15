@@ -27,15 +27,25 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# Banda barata: ~51% de acierto real, pero +EV por el payout alto a precio
-# bajo (177 muestras al momento de escribir esto, +$223.84 simulados con
-# stake de $5). Banda favorita: ~96% de acierto pero margen finísimo sobre
-# el breakeven (+$0.16/trade en promedio, 385 muestras) — casi seguro se
-# come con spread/slippage reales, así que arranca DESACTIVADA por
-# defecto hasta que más datos confirmen que el margen sobrevive en vivo.
+# Banda barata: sin filtro de magnitud, ~51% de acierto real (183 muestras)
+# — pero ese promedio escondía que 3 de cada 4 señales (las de movimiento
+# de TWAP60 más chico) rendían ~41%, peor que moneda al aire, y solo el
+# cuartil de movimientos más GRANDES rendía 78%. Confirmado en
+# /api/shadow-magnitude y /api/shadow-filtered-sim (15-ago-2026): exigir un
+# delta relativo mínimo sube el acierto real de 51%→61% mientras conserva
+# casi toda la plata total (+$219 vs +$228 sin filtro, con menos de la
+# mitad de los trades) — mucho más margen de seguridad contra costos de
+# ejecución reales que el backtest no modela. MIN_REL_DELTA_CHEAP es ese
+# umbral (el "laxo" del backtest, no el más estricto — ese preserva más
+# plata total aunque tenga menos acierto por trade).
+#
+# Banda favorita: ~96% de acierto, margen fino (+$0.16/trade, ~3.2% de
+# retorno) pero confirmado estable en 3 mediciones independientes seguidas
+# (n=210→385→393) — ya no parece ruido de muestra chica, se activa.
 CHEAP_MAX = 0.55
 FAVORITE_MIN = 0.85
-TRADE_FAVORITE_BAND = False
+MIN_REL_DELTA_CHEAP = 0.0001
+TRADE_FAVORITE_BAND = True
 
 ENTRY_WINDOW_START = 120   # mismos límites de tiempo que v1 — los datos de
 ENTRY_WINDOW_END = 55      # shadow_logger se recolectaron en esta ventana,
@@ -99,6 +109,14 @@ def generate_signal_v2(chainlink_snapshot: dict, market: dict) -> dict:
 
     if price < CHEAP_MAX:
         band = "cheap"
+        rel_delta = abs(diff / twap60_open) if twap60_open else 0
+        if rel_delta < MIN_REL_DELTA_CHEAP:
+            result["blocked"] = True
+            result["block_reason"] = (
+                f"TWAP60 move too small in cheap band: rel_delta={rel_delta:.6f} "
+                f"< {MIN_REL_DELTA_CHEAP} (ver /api/shadow-filtered-sim)"
+            )
+            return result
     elif price >= FAVORITE_MIN:
         band = "favorite"
     else:
