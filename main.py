@@ -27,6 +27,13 @@ if config.SHADOW_MODE_ENABLED:
     from chainlink_feed import start_chainlink_feed, get_chainlink_feed
     from shadow_logger import get_shadow_logger
 
+# Modelo v2 (TWAP + bandas de precio) — paper trading separado, nunca toca
+# plata real. Depende del feed de Chainlink, así que solo corre si
+# SHADOW_MODE_ENABLED también está prendido.
+if config.SHADOW_MODE_ENABLED:
+    from signal_engine_v2 import generate_signal_v2, ENTRY_WINDOW_START as V2_ENTRY_START, ENTRY_WINDOW_END as V2_ENTRY_END
+    from paper_trader_v2 import get_trader_v2
+
 # Delta mínimo del activo correlacionado para contar como confirmación cruzada
 CROSS_ASSET_MIN_DELTA = 0.0003
 
@@ -113,13 +120,14 @@ def trading_loop():
     live = get_live_trader() if not config.PAPER_TRADING else None
     shadow = get_shadow_logger() if config.SHADOW_MODE_ENABLED else None
     chainlink = get_chainlink_feed() if config.SHADOW_MODE_ENABLED else None
+    paper_v2 = get_trader_v2() if config.SHADOW_MODE_ENABLED else None
 
     logger.info(f"Trading loop started — mode: {'LIVE' if live else 'PAPER'} — warming up 60s...")
     time.sleep(60)
 
     while True:
         try:
-            _tick(scanner, feed, paper, live, shadow, chainlink)
+            _tick(scanner, feed, paper, live, shadow, chainlink, paper_v2)
         except Exception as e:
             logger.error(f"Tick error: {e}")
         time.sleep(10)
@@ -147,8 +155,11 @@ def _cross_asset_confirm(feed, asset: str) -> str | None:
     return None
 
 
-def _tick(scanner, feed, paper, live, shadow=None, chainlink=None):
+def _tick(scanner, feed, paper, live, shadow=None, chainlink=None, paper_v2=None):
     resolve_expired(paper)
+
+    if paper_v2:
+        resolve_expired(paper_v2)  # misma función genérica — solo necesita open_positions/resolve_trade
 
     if shadow and chainlink:
         try:
@@ -181,6 +192,7 @@ def _tick(scanner, feed, paper, live, shadow=None, chainlink=None):
 
     paper_open = set(paper.open_positions.keys())
     live_open = set(live.open_positions.keys()) if live else set()
+    paper_v2_open = set(paper_v2.open_positions.keys()) if paper_v2 else set()
 
     for market in markets:
         market_id = market["id"]
@@ -221,6 +233,31 @@ def _tick(scanner, feed, paper, live, shadow=None, chainlink=None):
                 shadow.log_decision(market, indicators, signal, chainlink, window_ts, market.get("ref_price"))
             except Exception as e:
                 logger.debug(f"Shadow log_decision error: {e}")
+
+        # Modelo v2 (TWAP + bandas de precio) — independiente de v1, se
+        # evalúa siempre, aunque v1 esté bloqueado. Nunca toca plata real,
+        # solo paper_v2 (ver paper_trader_v2.py).
+        if paper_v2 and chainlink and market_id not in paper_v2_open:
+            try:
+                window_ts = int(time.time() // 300) * 300
+                snap = chainlink.get_snapshot(asset)
+                w60 = chainlink.get_window_twap(asset, 60, window_ts)
+                snap["twap60_open"] = w60.get("open")
+                signal_v2 = generate_signal_v2(snap, market)
+                if not signal_v2["blocked"]:
+                    v2_asset_open = [p for p in paper_v2.open_positions.values() if p.get("asset") == asset]
+                    if not v2_asset_open:
+                        paper_v2.open_trade(
+                            market_id=str(market_id),
+                            title=market["title"],
+                            asset=asset,
+                            side=signal_v2["side"],
+                            price=signal_v2["entry_price"],
+                            band=signal_v2["band"],
+                            reasons=signal_v2["reasons"],
+                        )
+            except Exception as e:
+                logger.debug(f"Signal v2 error [{asset}]: {e}")
 
         if signal["blocked"]:
             logger.info(f"Blocked [{asset.upper()} T-{seconds_left:.0f}s]: {signal['block_reason']}")
@@ -285,10 +322,14 @@ def get_combined_stats():
     claramente etiquetado en su propia sección."""
     paper_stats = get_trader().get_stats()
     if not config.PAPER_TRADING:
-        live_stats = get_live_trader().get_stats()
-        live_stats["paper"] = paper_stats
-        return live_stats
-    return paper_stats
+        base = get_live_trader().get_stats()
+        base["paper"] = paper_stats
+    else:
+        base = paper_stats
+
+    if config.SHADOW_MODE_ENABLED:
+        base["paper_v2"] = get_trader_v2().get_stats()
+    return base
 
 
 def main():

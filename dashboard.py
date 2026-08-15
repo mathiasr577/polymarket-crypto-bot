@@ -138,6 +138,32 @@ HTML = """
 </div>
 {% endif %}
 
+{% if stats.paper_v2 is defined %}
+<div class="section">
+  <h2>🧪 Paper trading v2 (TWAP + bandas de precio — simulado, en paralelo)</h2>
+  <div class="grid">
+    <div class="card">
+      <div class="label">Balance v2</div>
+      <div class="value purple">${{ "%.2f"|format(stats.paper_v2.balance) }}</div>
+    </div>
+    <div class="card">
+      <div class="label">P&L v2</div>
+      <div class="value {{ 'green' if stats.paper_v2.pnl >= 0 else 'red' }}">${{ "%+.2f"|format(stats.paper_v2.pnl) }}</div>
+      <div class="sublabel">ROI: {{ "%.1f"|format(stats.paper_v2.roi) }}%</div>
+    </div>
+    <div class="card">
+      <div class="label">Win rate v2</div>
+      <div class="value">{{ "%.1f"|format(stats.paper_v2.win_rate) }}%</div>
+      <div class="sublabel">{{ stats.paper_v2.wins }}W / {{ stats.paper_v2.total_trades - stats.paper_v2.wins }}L</div>
+    </div>
+    <div class="card">
+      <div class="label">Posiciones abiertas v2</div>
+      <div class="value yellow">{{ stats.paper_v2.open_count }}</div>
+    </div>
+  </div>
+</div>
+{% endif %}
+
 {% if shadow_stats and shadow_stats.resolved %}
 <div class="section">
   <h2>🔬 Shadow-mode: Chainlink TWAP vs. ganador real (fase 1)</h2>
@@ -418,10 +444,13 @@ def create_dashboard(get_stats_fn, get_prices_fn, get_markets_fn=None, mode="PAP
             recent.append(t2)
         stats["recent_trades"] = recent
 
-        # stats["paper"], si existe, sigue siendo un dict plano — convertirlo
-        # también a objeto para que stats.paper.balance funcione en el template.
+        # stats["paper"] / stats["paper_v2"], si existen, siguen siendo
+        # dicts planos — convertirlos también a objeto para que
+        # stats.paper.balance funcione en el template.
         if "paper" in stats:
             stats["paper"] = type("P", (), dict(stats["paper"]))()
+        if "paper_v2" in stats:
+            stats["paper_v2"] = type("P2", (), dict(stats["paper_v2"]))()
 
         return render_template_string(
             HTML,
