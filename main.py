@@ -364,6 +364,7 @@ def main():
         get_shadow_magnitude_fn=(get_shadow_logger().get_magnitude_and_agreement_report if config.SHADOW_MODE_ENABLED else None),
         get_shadow_filtered_sim_fn=(get_shadow_logger().simulate_v2_filtered_policy if config.SHADOW_MODE_ENABLED else None),
         get_shadow_favorite_detail_fn=(get_shadow_logger().get_favorite_band_detail if config.SHADOW_MODE_ENABLED else None),
+        get_shadow_hourly_fn=(get_shadow_logger().get_hourly_report if config.SHADOW_MODE_ENABLED else None),
     )
 
     flask_app.run(host="0.0.0.0", port=config.PORT)

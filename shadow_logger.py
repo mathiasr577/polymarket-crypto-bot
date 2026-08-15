@@ -80,6 +80,8 @@ CREATE TABLE IF NOT EXISTS shadow_decisions (
     old_model_raw_side TEXT,
     p_old FLOAT,
     old_model_side TEXT,
+    twap_pressure_integral FLOAT,
+    twap_pressure_last_divergence FLOAT,
 
     polymarket_up_price FLOAT,
     polymarket_down_price FLOAT,
@@ -92,10 +94,12 @@ CREATE TABLE IF NOT EXISTS shadow_decisions (
     predicted_winner_kraken TEXT
 );
 
--- CREATE TABLE IF NOT EXISTS no altera una tabla que ya existe — esta
--- columna se agregó después del deploy inicial, así que hace falta
--- migrarla explícitamente en tablas viejas.
+-- CREATE TABLE IF NOT EXISTS no altera una tabla que ya existe — estas
+-- columnas se agregaron después del deploy inicial, así que hace falta
+-- migrarlas explícitamente en tablas viejas.
 ALTER TABLE shadow_decisions ADD COLUMN IF NOT EXISTS old_model_raw_side TEXT;
+ALTER TABLE shadow_decisions ADD COLUMN IF NOT EXISTS twap_pressure_integral FLOAT;
+ALTER TABLE shadow_decisions ADD COLUMN IF NOT EXISTS twap_pressure_last_divergence FLOAT;
 """
 
 
@@ -246,6 +250,14 @@ class ShadowLogger:
             "polymarket_up_price": _safe(market.get("up_price")),
             "polymarket_down_price": _safe(market.get("down_price")),
         }
+
+        # Presión TWAP (integral de spot-twap60 en lo que va de la ventana)
+        # — se guarda desde ya, sin usarla para ninguna decisión todavía.
+        # Ver chainlink_feed.py.
+        if hasattr(chainlink_feed, "get_pressure"):
+            pressure = chainlink_feed.get_pressure(asset, kraken_window_ts)
+            row["twap_pressure_integral"] = _safe(pressure.get("integral"))
+            row["twap_pressure_last_divergence"] = _safe(pressure.get("last_divergence"))
 
         cols = ", ".join(row.keys())
         placeholders = ", ".join(f"%({k})s" for k in row.keys())
@@ -1033,6 +1045,70 @@ class ShadowLogger:
                 "max_reward_per_trade_approx": round(stake * (1 - mid) / mid * (1 - fee), 4),
             })
         return {"sub_bands": report}
+
+    def get_hourly_report(self, min_rel_delta_cheap=0.0001, favorite_max=0.97, stake=5.0, fee=0.07) -> dict:
+        """Igual que get_weekday_weekend_report pero por hora UTC — usa la
+        MISMA política que ya está desplegada en signal_engine_v2.py (filtro
+        de magnitud en banda barata, banda favorita 0.85-0.97) para ver si
+        hay horas del día particularmente buenas o malas, sin necesidad de
+        recolectar ningún dato nuevo."""
+        if not self.conn:
+            return {}
+        try:
+            with self.conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute("""
+                    SELECT actual_outcome, polymarket_up_price, polymarket_down_price,
+                           twap60_open, twap60_now, decision_timestamp
+                    FROM shadow_decisions
+                    WHERE resolved_at IS NOT NULL AND NOT data_gap
+                      AND twap60_open IS NOT NULL AND twap60_now IS NOT NULL
+                      AND decision_timestamp IS NOT NULL
+                """)
+                rows = cur.fetchall()
+        except Exception as e:
+            logger.error(f"Hourly report error: {e}")
+            return {}
+
+        hours = {h: {"n": 0, "wins": 0, "pnl": 0.0} for h in range(24)}
+        for row in rows:
+            diff = row["twap60_now"] - row["twap60_open"]
+            if diff == 0 or not row["twap60_open"]:
+                continue
+            side = "UP" if diff > 0 else "DOWN"
+            price = row["polymarket_up_price"] if side == "UP" else row["polymarket_down_price"]
+            if price is None or price <= 0 or price >= 1:
+                continue
+
+            if price < 0.55:
+                rel_mag = abs(diff / row["twap60_open"])
+                if rel_mag < min_rel_delta_cheap:
+                    continue
+            elif 0.85 <= price < favorite_max:
+                pass
+            else:
+                continue
+
+            win = side == row["actual_outcome"]
+            pnl = stake * ((1 - price) / price) * (1 - fee) if win else -stake
+            h = row["decision_timestamp"].hour
+            hours[h]["n"] += 1
+            hours[h]["pnl"] += pnl
+            if win:
+                hours[h]["wins"] += 1
+
+        report = []
+        for h in range(24):
+            b = hours[h]
+            if b["n"] == 0:
+                continue
+            report.append({
+                "hour_utc": h,
+                "n": b["n"],
+                "win_rate": round(b["wins"] / b["n"], 3),
+                "total_pnl": round(b["pnl"], 2),
+                "avg_pnl_per_trade": round(b["pnl"] / b["n"], 3),
+            })
+        return {"hours": report}
 
 
 _logger_instance = ShadowLogger()

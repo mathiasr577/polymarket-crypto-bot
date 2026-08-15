@@ -407,7 +407,7 @@ HTML = """
 </html>
 """
 
-def create_dashboard(get_stats_fn, get_prices_fn, get_markets_fn=None, mode="PAPER TRADING", get_shadow_stats_fn=None, get_shadow_backtest_fn=None, get_shadow_calibration_fn=None, get_arb_stats_fn=None, get_shadow_calib_curve_fn=None, get_shadow_weekday_fn=None, get_shadow_lead_fn=None, get_shadow_v2_sim_fn=None, get_shadow_model_comparison_fn=None, get_shadow_magnitude_fn=None, get_shadow_filtered_sim_fn=None, get_shadow_favorite_detail_fn=None):
+def create_dashboard(get_stats_fn, get_prices_fn, get_markets_fn=None, mode="PAPER TRADING", get_shadow_stats_fn=None, get_shadow_backtest_fn=None, get_shadow_calibration_fn=None, get_arb_stats_fn=None, get_shadow_calib_curve_fn=None, get_shadow_weekday_fn=None, get_shadow_lead_fn=None, get_shadow_v2_sim_fn=None, get_shadow_model_comparison_fn=None, get_shadow_magnitude_fn=None, get_shadow_filtered_sim_fn=None, get_shadow_favorite_detail_fn=None, get_shadow_hourly_fn=None):
     @app.route("/")
     def index():
         stats = get_stats_fn()
@@ -515,6 +515,10 @@ def create_dashboard(get_stats_fn, get_prices_fn, get_markets_fn=None, mode="PAP
     @app.route("/api/shadow-favorite-detail")
     def api_shadow_favorite_detail():
         return jsonify(get_shadow_favorite_detail_fn() if get_shadow_favorite_detail_fn else {})
+
+    @app.route("/api/shadow-hourly")
+    def api_shadow_hourly():
+        return jsonify(get_shadow_hourly_fn() if get_shadow_hourly_fn else {})
 
     @app.route("/health")
     def health():

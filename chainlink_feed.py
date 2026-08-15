@@ -75,6 +75,15 @@ class ChainlinkFeed:
         # por ventana de 5 min: open (primer valor visto) y last (más reciente)
         # self._window[30]["bitcoin"][window_ts] = {"open":..,"open_ts":..,"last":..,"last_ts":..}
         self._window = {30: defaultdict(dict), 60: defaultdict(dict)}
+        # "presión TWAP": integral en el tiempo de (spot - twap60) dentro de
+        # la ventana actual — no es lo mismo que spot_now - twap60_now (un
+        # solo punto): si el spot lleva 20s pegado por encima del TWAP pesa
+        # más que un toque de 500ms que ya volvió. Idea propuesta por una
+        # IA externa consultada (ver conversación, 15-ago-2026), evaluada
+        # como razonable y barata de construir con datos que ya recibimos
+        # — todavía sin validar con datos reales, se guarda en shadow-mode
+        # nada más por ahora, no se usa para ninguna decisión de trading.
+        self._pressure = defaultdict(dict)
         self._connected = False
         self._reconnect_count = -1  # la primera conexión no cuenta como reconexión
         self._last_message_time = None
@@ -281,6 +290,57 @@ class ChainlinkFeed:
                 old = [k for k in bucket if k < window_ts - OLD_WINDOW_CUTOFF_SEC]
                 for k in old:
                     del bucket[k]
+
+            # Presión: solo el spot y el TWAP60 mueven la divergencia que
+            # nos interesa (spot - twap60). Se actualiza en cada mensaje de
+            # cualquiera de los dos, usando el último valor conocido del otro.
+            if kind in ("spot", "twap_60"):
+                self._update_pressure(asset, symbol, now)
+
+    def _update_pressure(self, asset, symbol, now):
+        """Debe llamarse con self._lock ya tomado. Integral trapezoidal
+        simple: asume que la divergencia se mantuvo constante en el último
+        valor conocido desde la última actualización hasta ahora."""
+        spot_entry = self._latest[symbol].get("spot")
+        twap_entry = self._latest[symbol].get("twap_60")
+        if not spot_entry or not twap_entry:
+            return
+        spot = spot_entry.get("value")
+        twap60 = twap_entry.get("value")
+        if spot is None or twap60 is None:
+            return
+
+        divergence = spot - twap60
+        window_ts = int(now // WINDOW_SECONDS) * WINDOW_SECONDS
+        bucket = self._pressure[asset]
+        p = bucket.setdefault(window_ts, {"integral": 0.0, "last_update": None, "last_divergence": None, "samples": 0})
+        if p["last_update"] is not None:
+            dt = now - p["last_update"]
+            prev = p["last_divergence"] if p["last_divergence"] is not None else divergence
+            p["integral"] += prev * dt
+        p["last_update"] = now
+        p["last_divergence"] = divergence
+        p["samples"] += 1
+
+        old = [k for k in bucket if k < window_ts - OLD_WINDOW_CUTOFF_SEC]
+        for k in old:
+            del bucket[k]
+
+    def get_pressure(self, asset: str, window_ts: int = None) -> dict:
+        """Integral de (spot - twap60) desde la apertura de la ventana
+        hasta ahora, más la divergencia puntual actual (para ver si la
+        presión está creciendo o cerrándose). Vacío si no hay datos aún."""
+        if window_ts is None:
+            window_ts = int(time.time() // WINDOW_SECONDS) * WINDOW_SECONDS
+        with self._lock:
+            p = dict(self._pressure.get(asset, {}).get(window_ts, {}))
+        if not p:
+            return {"integral": None, "last_divergence": None, "samples": 0}
+        return {
+            "integral": p.get("integral"),
+            "last_divergence": p.get("last_divergence"),
+            "samples": p.get("samples", 0),
+        }
 
     # -- lectura -------------------------------------------------------
 
