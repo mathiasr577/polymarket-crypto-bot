@@ -900,9 +900,14 @@ class ShadowLogger:
             logger.error(f"v2 filtered policy simulation error: {e}")
             return {}
 
-        def run(min_rel_delta, require_agreement, favorite_min_rel_delta=None):
-            n = wins = 0
-            pnl = 0.0
+        def run(min_rel_delta, require_agreement):
+            """IMPORTANTE (bug corregido): la banda favorita (>=0.85, ~385
+            trades al ~96% de acierto pero margen fino) se reporta SIEMPRE
+            SIN el filtro de magnitud aplicado y SEPARADA de la banda
+            barata — mezclarlas en un solo total (como hacía la versión
+            anterior) tapaba completamente el efecto del filtro, que es
+            específico de la banda barata."""
+            bands = {"cheap": {"n": 0, "wins": 0, "pnl": 0.0}, "favorite": {"n": 0, "wins": 0, "pnl": 0.0}}
             for row in rows:
                 diff60 = row["twap60_now"] - row["twap60_open"]
                 if diff60 == 0 or not row["twap60_open"]:
@@ -912,43 +917,51 @@ class ShadowLogger:
                 if price is None or price <= 0 or price >= 1:
                     continue
 
-                rel_mag = abs(diff60 / row["twap60_open"])
-
                 if price < 0.55:
+                    band = "cheap"
+                    rel_mag = abs(diff60 / row["twap60_open"])
                     if rel_mag < min_rel_delta:
                         continue
+                    if require_agreement:
+                        if row["twap30_open"] is None or row["twap30_now"] is None:
+                            continue
+                        diff30 = row["twap30_now"] - row["twap30_open"]
+                        if diff30 == 0:
+                            continue
+                        if ("UP" if diff30 > 0 else "DOWN") != side:
+                            continue
                 elif price >= 0.85:
-                    if favorite_min_rel_delta is not None and rel_mag < favorite_min_rel_delta:
-                        continue
+                    band = "favorite"  # sin filtro — se reporta tal cual para comparar aparte
                 else:
-                    continue  # zona excluida 0.55-0.85, igual que siempre
-
-                if require_agreement:
-                    if row["twap30_open"] is None or row["twap30_now"] is None:
-                        continue
-                    diff30 = row["twap30_now"] - row["twap30_open"]
-                    if diff30 == 0:
-                        continue
-                    side30 = "UP" if diff30 > 0 else "DOWN"
-                    if side30 != side:
-                        continue
+                    continue
 
                 win = side == row["actual_outcome"]
-                pnl += stake * ((1 - price) / price) * (1 - fee) if win else -stake
-                n += 1
+                pnl = stake * ((1 - price) / price) * (1 - fee) if win else -stake
+                b = bands[band]
+                b["n"] += 1
+                b["pnl"] += pnl
                 if win:
-                    wins += 1
+                    b["wins"] += 1
 
+            for b in bands.values():
+                b["win_rate"] = round(b["wins"] / b["n"], 3) if b["n"] else None
+                b["pnl"] = round(b["pnl"], 2)
+                b["avg_pnl_per_trade"] = round(b["pnl"] / b["n"], 3) if b["n"] else None
+
+            combined_n = bands["cheap"]["n"] + bands["favorite"]["n"]
+            combined_pnl = bands["cheap"]["pnl"] + bands["favorite"]["pnl"]
             return {
-                "n": n,
-                "win_rate": round(wins / n, 3) if n else None,
-                "total_pnl": round(pnl, 2),
-                "avg_pnl_per_trade": round(pnl / n, 3) if n else None,
+                "cheap_band": bands["cheap"],
+                "favorite_band": bands["favorite"],
+                "combined_n": combined_n,
+                "combined_pnl": round(combined_pnl, 2),
             }
 
         # Cuartil 4 observado en get_magnitude_and_agreement_report empezaba
         # en rel_delta ~0.00023 — se prueba ese umbral y uno más laxo/más
-        # estricto para ver qué tan sensible es el resultado.
+        # estricto para ver qué tan sensible es el resultado. La banda
+        # favorita es idéntica en todas las filas (no tiene filtro) — se
+        # deja así para poder comparar aparte, no para confundir el total.
         return {
             "baseline_no_filter": run(min_rel_delta=0, require_agreement=False),
             "magnitude_only_loose_0.0001": run(min_rel_delta=0.0001, require_agreement=False),
