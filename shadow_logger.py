@@ -632,6 +632,90 @@ class ShadowLogger:
             logger.error(f"Lead signal report error: {e}")
             return {}
 
+    def simulate_v2_policy(self, cheap_max=0.55, favorite_min=0.85,
+                            trade_favorite_band=True, stake=5.0, fee=0.07) -> dict:
+        """Backtest de la política v2 propuesta: tradear el lado que indica
+        TWAP60 (twap60_now vs twap60_open), pero SOLO en bandas de precio
+        que get_calibration_report() ya mostró que le ganan al breakeven —
+        evitando la zona 0.55-0.85 donde ni TWAP ni el modelo viejo
+        funcionan hoy. Corre sobre TODO el historial ya recolectado, con el
+        tamaño de posición y fórmula de fee reales del bot, para dar un
+        número de plata simulada concreto en vez de solo % de acierto.
+
+        No ejecuta nada — es 100% retroactivo sobre datos ya guardados.
+        Reporta también un desglose por banda para poder ver si el
+        resultado está dominado por unos pocos mercados correlacionados
+        (mala señal) o distribuido parejo (buena señal)."""
+        if not self.conn:
+            return {}
+        try:
+            with self.conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute("""
+                    SELECT actual_outcome, polymarket_up_price, polymarket_down_price,
+                           twap60_open, twap60_now, decision_timestamp
+                    FROM shadow_decisions
+                    WHERE resolved_at IS NOT NULL AND NOT data_gap
+                      AND twap60_open IS NOT NULL AND twap60_now IS NOT NULL
+                """)
+                rows = cur.fetchall()
+        except Exception as e:
+            logger.error(f"v2 policy simulation query error: {e}")
+            return {}
+
+        def band_of(price):
+            if price < cheap_max:
+                return "cheap"
+            if price >= favorite_min:
+                return "favorite"
+            return "excluded"
+
+        bands = {}
+        total_pnl = 0.0
+        total_n = 0
+        total_wins = 0
+        for row in rows:
+            diff = row["twap60_now"] - row["twap60_open"]
+            if diff == 0:
+                continue
+            side = "UP" if diff > 0 else "DOWN"
+            price = row["polymarket_up_price"] if side == "UP" else row["polymarket_down_price"]
+            if price is None or price <= 0 or price >= 1:
+                continue
+            band = band_of(price)
+            if band == "excluded":
+                continue
+            if band == "favorite" and not trade_favorite_band:
+                continue
+
+            win = side == row["actual_outcome"]
+            pnl = stake * ((1 - price) / price) * (1 - fee) if win else -stake
+
+            b = bands.setdefault(band, {"n": 0, "wins": 0, "pnl": 0.0})
+            b["n"] += 1
+            b["pnl"] += pnl
+            if win:
+                b["wins"] += 1
+
+            total_pnl += pnl
+            total_n += 1
+            if win:
+                total_wins += 1
+
+        for b in bands.values():
+            b["win_rate"] = round(b["wins"] / b["n"], 3) if b["n"] else None
+            b["pnl"] = round(b["pnl"], 2)
+            b["avg_pnl_per_trade"] = round(b["pnl"] / b["n"], 3) if b["n"] else None
+
+        return {
+            "stake_per_trade": stake,
+            "total_n": total_n,
+            "total_wins": total_wins,
+            "win_rate": round(total_wins / total_n, 3) if total_n else None,
+            "total_simulated_pnl": round(total_pnl, 2),
+            "avg_pnl_per_trade": round(total_pnl / total_n, 3) if total_n else None,
+            "by_band": bands,
+        }
+
 
 _logger_instance = ShadowLogger()
 

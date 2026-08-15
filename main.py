@@ -318,6 +318,7 @@ def main():
         get_shadow_calib_curve_fn=(get_shadow_logger().get_probability_calibration if config.SHADOW_MODE_ENABLED else None),
         get_shadow_weekday_fn=(get_shadow_logger().get_weekday_weekend_report if config.SHADOW_MODE_ENABLED else None),
         get_shadow_lead_fn=(get_shadow_logger().get_lead_signal_report if config.SHADOW_MODE_ENABLED else None),
+        get_shadow_v2_sim_fn=(get_shadow_logger().simulate_v2_policy if config.SHADOW_MODE_ENABLED else None),
     )
 
     flask_app.run(host="0.0.0.0", port=config.PORT)
