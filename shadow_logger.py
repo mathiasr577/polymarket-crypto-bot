@@ -875,6 +875,89 @@ class ShadowLogger:
             },
         }
 
+    def simulate_v2_filtered_policy(self, stake=5.0, fee=0.07) -> dict:
+        """Backtest de PnL real (no solo % de acierto) para varios filtros
+        de calidad sobre la política v2 en la banda barata (<0.55), a
+        partir de lo que mostró get_magnitude_and_agreement_report(): el
+        51% promedio esconde que el cuartil de movimientos MÁS GRANDES de
+        TWAP60 acierta 78% mientras los otros tres cuartiles rinden ~41%
+        (peor que moneda al aire). Corre varias combinaciones para elegir
+        el filtro real a desplegar, viendo el trade-off entre selectividad
+        (menos trades) y calidad (más acierto/plata)."""
+        if not self.conn:
+            return {}
+        try:
+            with self.conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute("""
+                    SELECT actual_outcome, polymarket_up_price, polymarket_down_price,
+                           twap30_open, twap30_now, twap60_open, twap60_now
+                    FROM shadow_decisions
+                    WHERE resolved_at IS NOT NULL AND NOT data_gap
+                      AND twap60_open IS NOT NULL AND twap60_now IS NOT NULL
+                """)
+                rows = cur.fetchall()
+        except Exception as e:
+            logger.error(f"v2 filtered policy simulation error: {e}")
+            return {}
+
+        def run(min_rel_delta, require_agreement, favorite_min_rel_delta=None):
+            n = wins = 0
+            pnl = 0.0
+            for row in rows:
+                diff60 = row["twap60_now"] - row["twap60_open"]
+                if diff60 == 0 or not row["twap60_open"]:
+                    continue
+                side = "UP" if diff60 > 0 else "DOWN"
+                price = row["polymarket_up_price"] if side == "UP" else row["polymarket_down_price"]
+                if price is None or price <= 0 or price >= 1:
+                    continue
+
+                rel_mag = abs(diff60 / row["twap60_open"])
+
+                if price < 0.55:
+                    if rel_mag < min_rel_delta:
+                        continue
+                elif price >= 0.85:
+                    if favorite_min_rel_delta is not None and rel_mag < favorite_min_rel_delta:
+                        continue
+                else:
+                    continue  # zona excluida 0.55-0.85, igual que siempre
+
+                if require_agreement:
+                    if row["twap30_open"] is None or row["twap30_now"] is None:
+                        continue
+                    diff30 = row["twap30_now"] - row["twap30_open"]
+                    if diff30 == 0:
+                        continue
+                    side30 = "UP" if diff30 > 0 else "DOWN"
+                    if side30 != side:
+                        continue
+
+                win = side == row["actual_outcome"]
+                pnl += stake * ((1 - price) / price) * (1 - fee) if win else -stake
+                n += 1
+                if win:
+                    wins += 1
+
+            return {
+                "n": n,
+                "win_rate": round(wins / n, 3) if n else None,
+                "total_pnl": round(pnl, 2),
+                "avg_pnl_per_trade": round(pnl / n, 3) if n else None,
+            }
+
+        # Cuartil 4 observado en get_magnitude_and_agreement_report empezaba
+        # en rel_delta ~0.00023 — se prueba ese umbral y uno más laxo/más
+        # estricto para ver qué tan sensible es el resultado.
+        return {
+            "baseline_no_filter": run(min_rel_delta=0, require_agreement=False),
+            "magnitude_only_loose_0.0001": run(min_rel_delta=0.0001, require_agreement=False),
+            "magnitude_only_q4_0.00023": run(min_rel_delta=0.00023, require_agreement=False),
+            "magnitude_only_strict_0.0005": run(min_rel_delta=0.0005, require_agreement=False),
+            "agreement_only": run(min_rel_delta=0, require_agreement=True),
+            "magnitude_q4_and_agreement": run(min_rel_delta=0.00023, require_agreement=True),
+        }
+
 
 _logger_instance = ShadowLogger()
 
