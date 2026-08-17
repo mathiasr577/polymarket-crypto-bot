@@ -50,8 +50,16 @@ logger = logging.getLogger(__name__)
 # real vs 98.14% necesario) — arriesgar $5 para ganar $0.09 en 104 casos,
 # solo +$2.10 total. FAVORITE_MAX corta esa cola sin filo; 0.99-1.00 tiene
 # muestra insuficiente (n=3) para confiar en cualquier sentido.
+#
+# FAVORITE_MIN bajado de 0.85 a 0.75 (16-ago-2026): con más datos (1837
+# mercados resueltos), la banda 0.75-0.85 empezó a ganarle al breakeven
+# también (84% real vs 81% necesario) — confirmado con backtest de plata
+# real, no solo el % de acierto: +$52.27 en 254 trades, $0.206/trade en
+# promedio (mejor que el promedio de la banda 0.85-0.97, $0.19/trade). Ver
+# /api/shadow-favorite-extension. 0.55-0.65 y 0.65-0.75 siguen sin ganarle
+# al breakeven (62% vs 62%, y 70% vs 71%) — esos quedan afuera todavía.
 CHEAP_MAX = 0.55
-FAVORITE_MIN = 0.85
+FAVORITE_MIN = 0.75
 FAVORITE_MAX = 0.97
 MIN_REL_DELTA_CHEAP = 0.0001
 TRADE_FAVORITE_BAND = True
@@ -137,7 +145,7 @@ def generate_signal_v2(chainlink_snapshot: dict, market: dict) -> dict:
         return result
     else:
         result["blocked"] = True
-        result["block_reason"] = f"Price {price:.2f} in excluded band (0.55-0.85, sin ventaja probada)"
+        result["block_reason"] = f"Price {price:.2f} in excluded band (0.55-0.75, sin ventaja probada)"
         return result
 
     if band == "favorite" and not TRADE_FAVORITE_BAND:
