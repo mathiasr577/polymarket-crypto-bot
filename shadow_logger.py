@@ -1133,6 +1133,64 @@ class ShadowLogger:
             })
         return {"hours": report}
 
+    def simulate_favorite_extension(self, stake=5.0, fee=0.07) -> dict:
+        """Con más datos (16-ago-2026), get_calibration_report mostró que
+        TWAP60 le empieza a ganar al breakeven también en 0.75-0.85 (84%
+        real vs 81% necesario, n=254) — banda que v2 hoy NO tradea porque
+        FAVORITE_MIN=0.85. Prueba con plata real simulada si extender la
+        banda favorita a 0.75-0.97 (en vez de 0.85-0.97) suma o resta
+        plata, comparado contra la política actual, sobre TODO el
+        historial ya recolectado — mismo criterio de siempre: número real
+        en dólares, no solo el % de acierto."""
+        if not self.conn:
+            return {}
+        try:
+            with self.conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute("""
+                    SELECT actual_outcome, polymarket_up_price, polymarket_down_price,
+                           twap60_open, twap60_now
+                    FROM shadow_decisions
+                    WHERE resolved_at IS NOT NULL AND NOT data_gap
+                      AND twap60_open IS NOT NULL AND twap60_now IS NOT NULL
+                """)
+                rows = cur.fetchall()
+        except Exception as e:
+            logger.error(f"Favorite extension simulation error: {e}")
+            return {}
+
+        def band_pnl(lo, hi):
+            n = wins = 0
+            pnl = 0.0
+            for row in rows:
+                diff = row["twap60_now"] - row["twap60_open"]
+                if diff == 0:
+                    continue
+                side = "UP" if diff > 0 else "DOWN"
+                price = row["polymarket_up_price"] if side == "UP" else row["polymarket_down_price"]
+                if price is None or not (lo <= price < hi):
+                    continue
+                win = side == row["actual_outcome"]
+                pnl += stake * ((1 - price) / price) * (1 - fee) if win else -stake
+                n += 1
+                if win:
+                    wins += 1
+            return {
+                "n": n,
+                "win_rate": round(wins / n, 3) if n else None,
+                "total_pnl": round(pnl, 2),
+                "avg_pnl_per_trade": round(pnl / n, 3) if n else None,
+            }
+
+        band_075_085 = band_pnl(0.75, 0.85)
+        band_085_097_current = band_pnl(0.85, 0.97)
+
+        return {
+            "new_band_0.75-0.85": band_075_085,
+            "current_favorite_0.85-0.97_unchanged_for_reference": band_085_097_current,
+            "extra_pnl_if_added": band_075_085["total_pnl"],
+            "recommendation": "add" if (band_075_085["n"] >= 100 and band_075_085["total_pnl"] > 0) else "wait_for_more_data",
+        }
+
 
 _logger_instance = ShadowLogger()
 
