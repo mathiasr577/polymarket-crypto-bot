@@ -1191,6 +1191,101 @@ class ShadowLogger:
             "recommendation": "add" if (band_075_085["n"] >= 100 and band_075_085["total_pnl"] > 0) else "wait_for_more_data",
         }
 
+    def get_v2_weekday_report(self, cheap_max=0.55, favorite_min=0.75, favorite_max=0.97,
+                               min_rel_delta_cheap=0.0001, stake=5.0, fee=0.07) -> dict:
+        """El modelo viejo rendía peor los fines de semana (volumen
+        institucional de cripto cae 20-40%, spreads más anchos — ver
+        conversación). Pregunta abierta: ¿la política v2 ACTUAL (la que
+        está desplegada ahora mismo, no una versión vieja) sufre lo mismo,
+        o el basarse en TWAP la hace más resistente? Reporta acierto/PnL
+        por día de la semana Y el corte binario entre semana/finde, usando
+        exactamente los mismos filtros que signal_engine_v2.py aplica hoy
+        en vivo (paper)."""
+        if not self.conn:
+            return {}
+        try:
+            with self.conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute("""
+                    SELECT actual_outcome, polymarket_up_price, polymarket_down_price,
+                           twap60_open, twap60_now, decision_timestamp
+                    FROM shadow_decisions
+                    WHERE resolved_at IS NOT NULL AND NOT data_gap
+                      AND twap60_open IS NOT NULL AND twap60_now IS NOT NULL
+                      AND decision_timestamp IS NOT NULL
+                """)
+                rows = cur.fetchall()
+        except Exception as e:
+            logger.error(f"v2 weekday report error: {e}")
+            return {}
+
+        DAY_NAMES = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
+        days = {i: {"n": 0, "wins": 0, "pnl": 0.0} for i in range(7)}  # 0=Monday (weekday() de Python)
+        weekday_agg = {"n": 0, "wins": 0, "pnl": 0.0}
+        weekend_agg = {"n": 0, "wins": 0, "pnl": 0.0}
+
+        for row in rows:
+            diff = row["twap60_now"] - row["twap60_open"]
+            if diff == 0 or not row["twap60_open"]:
+                continue
+            side = "UP" if diff > 0 else "DOWN"
+            price = row["polymarket_up_price"] if side == "UP" else row["polymarket_down_price"]
+            if price is None or price <= 0 or price >= 1:
+                continue
+
+            if price < cheap_max:
+                rel_mag = abs(diff / row["twap60_open"])
+                if rel_mag < min_rel_delta_cheap:
+                    continue
+            elif favorite_min <= price < favorite_max:
+                pass
+            else:
+                continue
+
+            win = side == row["actual_outcome"]
+            pnl = stake * ((1 - price) / price) * (1 - fee) if win else -stake
+            dow = row["decision_timestamp"].weekday()  # 0=Monday .. 6=Sunday
+
+            d = days[dow]
+            d["n"] += 1
+            d["pnl"] += pnl
+            if win:
+                d["wins"] += 1
+
+            agg = weekend_agg if dow >= 5 else weekday_agg
+            agg["n"] += 1
+            agg["pnl"] += pnl
+            if win:
+                agg["wins"] += 1
+
+        by_day = []
+        for i in range(7):
+            d = days[i]
+            if d["n"] == 0:
+                continue
+            by_day.append({
+                "day": DAY_NAMES[i],
+                "n": d["n"],
+                "win_rate": round(d["wins"] / d["n"], 3),
+                "total_pnl": round(d["pnl"], 2),
+                "avg_pnl_per_trade": round(d["pnl"] / d["n"], 3),
+            })
+
+        def summarize(agg):
+            if agg["n"] == 0:
+                return {"n": 0, "win_rate": None, "total_pnl": 0.0, "avg_pnl_per_trade": None}
+            return {
+                "n": agg["n"],
+                "win_rate": round(agg["wins"] / agg["n"], 3),
+                "total_pnl": round(agg["pnl"], 2),
+                "avg_pnl_per_trade": round(agg["pnl"] / agg["n"], 3),
+            }
+
+        return {
+            "by_day": by_day,
+            "weekday": summarize(weekday_agg),
+            "weekend": summarize(weekend_agg),
+        }
+
 
 _logger_instance = ShadowLogger()
 
