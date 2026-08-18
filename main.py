@@ -374,6 +374,9 @@ def main():
         get_shadow_hourly_fn=(get_shadow_logger().get_hourly_report if config.SHADOW_MODE_ENABLED else None),
         get_shadow_favorite_ext_fn=(get_shadow_logger().simulate_favorite_extension if config.SHADOW_MODE_ENABLED else None),
         get_shadow_v2_weekday_fn=(get_shadow_logger().get_v2_weekday_report if config.SHADOW_MODE_ENABLED else None),
+        get_shadow_lead_agreement_fn=(get_shadow_logger().get_lead_agreement_report if config.SHADOW_MODE_ENABLED else None),
+        get_shadow_ofi_fn=(get_shadow_logger().get_ofi_report if config.SHADOW_MODE_ENABLED else None),
+        get_shadow_pressure_fn=(get_shadow_logger().get_pressure_report if config.SHADOW_MODE_ENABLED else None),
     )
 
     flask_app.run(host="0.0.0.0", port=config.PORT)

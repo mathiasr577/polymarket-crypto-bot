@@ -1286,6 +1286,180 @@ class ShadowLogger:
             "weekend": summarize(weekend_agg),
         }
 
+    def get_lead_agreement_report(self) -> dict:
+        """get_lead_signal_report() ya confirmó que D_lead (spot vs TWAP60
+        ahora) predice 68.2% de las veces hacia dónde se mueve el TWAP
+        después, y 63.8% el ganador final — sin filtrar nada. Pregunta
+        natural: ¿combinarlo con la dirección propia de TWAP60 (open vs
+        now, la señal que ya usa v2) mejora el acierto? Mismo patrón que
+        el acuerdo TWAP30/TWAP60 que ya funcionó."""
+        if not self.conn:
+            return {}
+        try:
+            with self.conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute("""
+                    SELECT actual_outcome, chainlink_spot_now, twap60_open, twap60_now
+                    FROM shadow_decisions
+                    WHERE resolved_at IS NOT NULL AND NOT data_gap
+                      AND chainlink_spot_now IS NOT NULL
+                      AND twap60_open IS NOT NULL AND twap60_now IS NOT NULL
+                """)
+                rows = cur.fetchall()
+        except Exception as e:
+            logger.error(f"Lead agreement report error: {e}")
+            return {}
+
+        buckets = {
+            "twap_alone": {"n": 0, "correct": 0},
+            "lead_alone": {"n": 0, "correct": 0},
+            "agree": {"n": 0, "correct": 0},
+            "disagree_twap_right": 0,
+            "disagree_lead_right": 0,
+            "disagree_n": 0,
+        }
+        for row in rows:
+            twap_diff = row["twap60_now"] - row["twap60_open"]
+            lead_diff = row["chainlink_spot_now"] - row["twap60_now"]
+            if twap_diff == 0 or lead_diff == 0:
+                continue
+            twap_side = "UP" if twap_diff > 0 else "DOWN"
+            lead_side = "UP" if lead_diff > 0 else "DOWN"
+            outcome = row["actual_outcome"]
+
+            buckets["twap_alone"]["n"] += 1
+            if twap_side == outcome:
+                buckets["twap_alone"]["correct"] += 1
+            buckets["lead_alone"]["n"] += 1
+            if lead_side == outcome:
+                buckets["lead_alone"]["correct"] += 1
+
+            if twap_side == lead_side:
+                buckets["agree"]["n"] += 1
+                if twap_side == outcome:
+                    buckets["agree"]["correct"] += 1
+            else:
+                buckets["disagree_n"] += 1
+                if twap_side == outcome:
+                    buckets["disagree_twap_right"] += 1
+                if lead_side == outcome:
+                    buckets["disagree_lead_right"] += 1
+
+        def rate(b):
+            return round(b["correct"] / b["n"], 3) if b["n"] else None
+
+        return {
+            "twap_alone": {"n": buckets["twap_alone"]["n"], "win_rate": rate(buckets["twap_alone"])},
+            "lead_alone": {"n": buckets["lead_alone"]["n"], "win_rate": rate(buckets["lead_alone"])},
+            "agree": {"n": buckets["agree"]["n"], "win_rate": rate(buckets["agree"])},
+            "disagree": {
+                "n": buckets["disagree_n"],
+                "twap_win_rate": round(buckets["disagree_twap_right"] / buckets["disagree_n"], 3) if buckets["disagree_n"] else None,
+                "lead_win_rate": round(buckets["disagree_lead_right"] / buckets["disagree_n"], 3) if buckets["disagree_n"] else None,
+            },
+        }
+
+    def get_ofi_report(self) -> dict:
+        """Primera mirada real al order flow de Bybit acumulado estos días.
+        Para cada ventana (1s/5s/15s/30s), mide si el signo del OFI (compras
+        agresivas - ventas agresivas) predice el ganador real, solo y
+        combinado con la dirección de TWAP60 — mismo patrón que D_lead."""
+        if not self.conn:
+            return {}
+        try:
+            with self.conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute("""
+                    SELECT actual_outcome, twap60_open, twap60_now,
+                           ofi_1s, ofi_5s, ofi_15s, ofi_30s, ofi_n_trades_30s
+                    FROM shadow_decisions
+                    WHERE resolved_at IS NOT NULL AND NOT data_gap
+                """)
+                rows = cur.fetchall()
+        except Exception as e:
+            logger.error(f"OFI report error: {e}")
+            return {}
+
+        windows = ["ofi_1s", "ofi_5s", "ofi_15s", "ofi_30s"]
+        report = {}
+        for w in windows:
+            alone_n = alone_correct = 0
+            agree_n = agree_correct = 0
+            disagree_n = disagree_ofi_right = disagree_twap_right = 0
+            for row in rows:
+                ofi = row[w]
+                if ofi is None or ofi == 0:
+                    continue
+                ofi_side = "UP" if ofi > 0 else "DOWN"
+                outcome = row["actual_outcome"]
+
+                alone_n += 1
+                if ofi_side == outcome:
+                    alone_correct += 1
+
+                twap_diff = row["twap60_now"] - row["twap60_open"] if (row["twap60_now"] is not None and row["twap60_open"] is not None) else None
+                if twap_diff:
+                    twap_side = "UP" if twap_diff > 0 else "DOWN"
+                    if ofi_side == twap_side:
+                        agree_n += 1
+                        if ofi_side == outcome:
+                            agree_correct += 1
+                    else:
+                        disagree_n += 1
+                        if ofi_side == outcome:
+                            disagree_ofi_right += 1
+                        if twap_side == outcome:
+                            disagree_twap_right += 1
+
+            report[w] = {
+                "alone_n": alone_n,
+                "alone_win_rate": round(alone_correct / alone_n, 3) if alone_n else None,
+                "agree_with_twap60_n": agree_n,
+                "agree_with_twap60_win_rate": round(agree_correct / agree_n, 3) if agree_n else None,
+                "disagree_with_twap60_n": disagree_n,
+                "disagree_ofi_win_rate": round(disagree_ofi_right / disagree_n, 3) if disagree_n else None,
+                "disagree_twap_win_rate": round(disagree_twap_right / disagree_n, 3) if disagree_n else None,
+            }
+
+        n_with_ofi_data = sum(1 for r in rows if r.get("ofi_n_trades_30s"))
+        report["total_rows_checked"] = len(rows)
+        report["rows_with_ofi_data"] = n_with_ofi_data
+        return report
+
+    def get_pressure_report(self) -> dict:
+        """Primera mirada real a la 'presión TWAP' (integral de spot-twap60
+        en la ventana) acumulada estos días. Mide si el signo de la presión
+        y de la última divergencia puntual predicen el ganador real."""
+        if not self.conn:
+            return {}
+        try:
+            with self.conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute("""
+                    SELECT actual_outcome, twap_pressure_integral, twap_pressure_last_divergence
+                    FROM shadow_decisions
+                    WHERE resolved_at IS NOT NULL AND NOT data_gap
+                """)
+                rows = cur.fetchall()
+        except Exception as e:
+            logger.error(f"Pressure report error: {e}")
+            return {}
+
+        def check(field):
+            n = correct = 0
+            for row in rows:
+                val = row[field]
+                if val is None or val == 0:
+                    continue
+                side = "UP" if val > 0 else "DOWN"
+                n += 1
+                if side == row["actual_outcome"]:
+                    correct += 1
+            return {"n": n, "win_rate": round(correct / n, 3) if n else None}
+
+        return {
+            "pressure_integral_sign": check("twap_pressure_integral"),
+            "last_divergence_sign": check("twap_pressure_last_divergence"),
+            "total_rows_checked": len(rows),
+        }
+
 
 _logger_instance = ShadowLogger()
 
