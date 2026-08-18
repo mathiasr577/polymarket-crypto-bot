@@ -56,13 +56,29 @@ logger = logging.getLogger(__name__)
 # también (84% real vs 81% necesario) — confirmado con backtest de plata
 # real, no solo el % de acierto: +$52.27 en 254 trades, $0.206/trade en
 # promedio (mejor que el promedio de la banda 0.85-0.97, $0.19/trade). Ver
-# /api/shadow-favorite-extension. 0.55-0.65 y 0.65-0.75 siguen sin ganarle
-# al breakeven (62% vs 62%, y 70% vs 71%) — esos quedan afuera todavía.
+# /api/shadow-favorite-extension.
 CHEAP_MAX = 0.55
 FAVORITE_MIN = 0.75
 FAVORITE_MAX = 0.97
 MIN_REL_DELTA_CHEAP = 0.0001
 TRADE_FAVORITE_BAND = True
+
+# Zona media 0.55-0.75 (17-ago-2026): TWAP60 solo NO le gana al breakeven
+# acá (ver conversación), pero se encontró que tres señales adicionales
+# (D_lead = spot vs TWAP60 ahora; OFI de Bybit = compras/ventas agresivas
+# reales, no order book inferido; presión TWAP = integral en el tiempo de
+# spot-TWAP60) son mediocres SOLAS pero excelentes CONFIRMANDO la
+# dirección de TWAP60 (86-89% de acierto cuando coinciden, vs 80% de TWAP60
+# solo — ver /api/shadow-lead-agreement, /api/shadow-ofi,
+# /api/shadow-pressure). Contando cuántas de las 3 coinciden con TWAP60 en
+# ESTA zona específica (/api/shadow-confirmation): 0 confirmaciones pierde
+# (-$73.58, 106 trades), 2+ gana con margen real (+$28.84 a 69.5% con 2,
+# +$44.36 a 78.6% con 3 — el mejor retorno por trade de todo el dataset).
+# MID_ZONE_MIN_CONFIRMATIONS exige al menos 2 de 3.
+MID_ZONE_MIN = 0.55
+MID_ZONE_MAX = 0.75
+MID_ZONE_MIN_CONFIRMATIONS = 2
+TRADE_MID_ZONE = True
 
 ENTRY_WINDOW_START = 120   # mismos límites de tiempo que v1 — los datos de
 ENTRY_WINDOW_END = 55      # shadow_logger se recolectaron en esta ventana,
@@ -70,11 +86,53 @@ ENTRY_WINDOW_END = 55      # shadow_logger se recolectaron en esta ventana,
                             # en la misma ventana.
 
 
+def _count_confirmations(chainlink_snapshot: dict, twap_side: str) -> tuple[int, str]:
+    """Cuenta cuántas de {D_lead, OFI 15s, presión TWAP} coinciden con la
+    dirección de TWAP60. chainlink_snapshot debe traer chainlink_spot,
+    twap60_now, ofi_15s y pressure_integral (armado en main.py)."""
+    count = 0
+    parts = []
+
+    spot = chainlink_snapshot.get("chainlink_spot")
+    twap60_now = chainlink_snapshot.get("twap60_now")
+    if spot is not None and twap60_now is not None:
+        lead_diff = spot - twap60_now
+        if lead_diff != 0:
+            lead_side = "UP" if lead_diff > 0 else "DOWN"
+            if lead_side == twap_side:
+                count += 1
+                parts.append("lead✓")
+            else:
+                parts.append("lead✗")
+
+    ofi = chainlink_snapshot.get("ofi_15s")
+    if ofi is not None and ofi != 0:
+        ofi_side = "UP" if ofi > 0 else "DOWN"
+        if ofi_side == twap_side:
+            count += 1
+            parts.append("ofi✓")
+        else:
+            parts.append("ofi✗")
+
+    pressure = chainlink_snapshot.get("pressure_integral")
+    if pressure is not None and pressure != 0:
+        pressure_side = "UP" if pressure > 0 else "DOWN"
+        if pressure_side == twap_side:
+            count += 1
+            parts.append("pressure✓")
+        else:
+            parts.append("pressure✗")
+
+    return count, " ".join(parts) if parts else "sin datos de confirmación"
+
+
 def generate_signal_v2(chainlink_snapshot: dict, market: dict) -> dict:
     """chainlink_snapshot: dict con twap60_open (apertura de la ventana
-    actual, de ChainlinkFeed.get_window_twap) y twap60_now/feed_connected
-    (de ChainlinkFeed.get_snapshot) — se arma en main.py antes de llamar
-    acá, igual que se arma `indicators` para el modelo viejo."""
+    actual, de ChainlinkFeed.get_window_twap), twap60_now/chainlink_spot/
+    feed_connected (de ChainlinkFeed.get_snapshot), y opcionalmente
+    ofi_15s (de OrderFlowFeed.get_ofi) y pressure_integral (de
+    ChainlinkFeed.get_pressure) — se arma en main.py antes de llamar acá,
+    igual que se arma `indicators` para el modelo viejo."""
     result = {
         "side": None,
         "confidence": None,
@@ -143,9 +201,24 @@ def generate_signal_v2(chainlink_snapshot: dict, market: dict) -> dict:
             f"(>={FAVORITE_MAX}, breakeven ~empatado, ver /api/shadow-favorite-detail)"
         )
         return result
+    elif MID_ZONE_MIN <= price < MID_ZONE_MAX:
+        band = "mid_confirmed"
+        if not TRADE_MID_ZONE:
+            result["blocked"] = True
+            result["block_reason"] = "Mid zone (0.55-0.75) deshabilitada"
+            return result
+        confirmations, confirm_detail = _count_confirmations(chainlink_snapshot, side)
+        if confirmations < MID_ZONE_MIN_CONFIRMATIONS:
+            result["blocked"] = True
+            result["block_reason"] = (
+                f"Mid zone necesita {MID_ZONE_MIN_CONFIRMATIONS}+ confirmaciones "
+                f"(lead/ofi/pressure de acuerdo con TWAP60), tiene {confirmations} "
+                f"({confirm_detail}) — ver /api/shadow-confirmation"
+            )
+            return result
     else:
         result["blocked"] = True
-        result["block_reason"] = f"Price {price:.2f} in excluded band (0.55-0.75, sin ventaja probada)"
+        result["block_reason"] = f"Price {price:.2f} in excluded band (sin ventaja probada)"
         return result
 
     if band == "favorite" and not TRADE_FAVORITE_BAND:
@@ -155,8 +228,11 @@ def generate_signal_v2(chainlink_snapshot: dict, market: dict) -> dict:
 
     token_id = market["tokens"].get(side)
     result["side"] = side
-    result["confidence"] = "HIGH" if band == "cheap" else "MEDIUM"
-    result["reasons"] = [f"TWAP60 delta={diff:+.4f} -> {side}, price={price:.2f} band={band}"]
+    result["confidence"] = "HIGH" if band in ("cheap", "mid_confirmed") else "MEDIUM"
+    reason = f"TWAP60 delta={diff:+.4f} -> {side}, price={price:.2f} band={band}"
+    if band == "mid_confirmed":
+        reason += f" confirmations={confirmations} ({confirm_detail})"
+    result["reasons"] = [reason]
     result["token_id"] = token_id
     result["entry_price"] = price
     result["band"] = band

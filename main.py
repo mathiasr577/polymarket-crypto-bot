@@ -249,6 +249,9 @@ def _tick(scanner, feed, paper, live, shadow=None, chainlink=None, paper_v2=None
                 snap = chainlink.get_snapshot(asset)
                 w60 = chainlink.get_window_twap(asset, 60, window_ts)
                 snap["twap60_open"] = w60.get("open")
+                if order_flow:
+                    snap["ofi_15s"] = order_flow.get_ofi(asset, 15).get("ofi")
+                snap["pressure_integral"] = chainlink.get_pressure(asset, window_ts).get("integral")
                 signal_v2 = generate_signal_v2(snap, market)
                 if not signal_v2["blocked"]:
                     v2_asset_open = [p for p in paper_v2.open_positions.values() if p.get("asset") == asset]
