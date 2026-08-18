@@ -1460,6 +1460,84 @@ class ShadowLogger:
             "total_rows_checked": len(rows),
         }
 
+    def get_confirmation_report(self, stake=5.0, fee=0.07) -> dict:
+        """Los tres reportes anteriores mostraron el mismo patrón: D_lead,
+        OFI y presión TWAP son mediocres solos pero excelentes confirmando
+        a TWAP60 (86-89% cuando coinciden, vs 80% de TWAP60 solo). Esto
+        cuenta, para cada mercado, cuántas de esas tres señales coinciden
+        con la dirección de TWAP60 (0 a 3), y mide acierto real + PnL
+        simulado por nivel de confirmación — TANTO en las bandas que v2 ya
+        tradea COMO específicamente en la zona excluida 0.55-0.75, para ver
+        si con suficiente confirmación esa zona deja de estar excluida."""
+        if not self.conn:
+            return {}
+        try:
+            with self.conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute("""
+                    SELECT actual_outcome, polymarket_up_price, polymarket_down_price,
+                           twap60_open, twap60_now, chainlink_spot_now,
+                           ofi_15s, twap_pressure_integral
+                    FROM shadow_decisions
+                    WHERE resolved_at IS NOT NULL AND NOT data_gap
+                      AND twap60_open IS NOT NULL AND twap60_now IS NOT NULL
+                """)
+                rows = cur.fetchall()
+        except Exception as e:
+            logger.error(f"Confirmation report error: {e}")
+            return {}
+
+        def breakeven(price):
+            return price / (price + (1 - fee) * (1 - price))
+
+        # count -> {"excluded_zone": {...}, "already_traded_zone": {...}}
+        by_count = {c: {"excluded": {"n": 0, "wins": 0, "pnl": 0.0}, "traded": {"n": 0, "wins": 0, "pnl": 0.0}} for c in range(4)}
+
+        for row in rows:
+            twap_diff = row["twap60_now"] - row["twap60_open"]
+            if twap_diff == 0:
+                continue
+            twap_side = "UP" if twap_diff > 0 else "DOWN"
+            price = row["polymarket_up_price"] if twap_side == "UP" else row["polymarket_down_price"]
+            if price is None or price <= 0 or price >= 1:
+                continue
+
+            count = 0
+            if row["chainlink_spot_now"] is not None:
+                lead_diff = row["chainlink_spot_now"] - row["twap60_now"]
+                if lead_diff != 0 and (("UP" if lead_diff > 0 else "DOWN") == twap_side):
+                    count += 1
+            if row["ofi_15s"] is not None and row["ofi_15s"] != 0:
+                if (("UP" if row["ofi_15s"] > 0 else "DOWN") == twap_side):
+                    count += 1
+            if row["twap_pressure_integral"] is not None and row["twap_pressure_integral"] != 0:
+                if (("UP" if row["twap_pressure_integral"] > 0 else "DOWN") == twap_side):
+                    count += 1
+
+            zone = "excluded" if 0.55 <= price < 0.75 else "traded"
+            win = twap_side == row["actual_outcome"]
+            pnl = stake * ((1 - price) / price) * (1 - fee) if win else -stake
+
+            b = by_count[count][zone]
+            b["n"] += 1
+            b["pnl"] += pnl
+            if win:
+                b["wins"] += 1
+
+        report = {"excluded_zone_0.55-0.75": [], "already_traded_zones": []}
+        for count in range(4):
+            for zone_key, out_key in (("excluded", "excluded_zone_0.55-0.75"), ("traded", "already_traded_zones")):
+                b = by_count[count][zone_key]
+                if b["n"] == 0:
+                    continue
+                report[out_key].append({
+                    "confirmations": count,
+                    "n": b["n"],
+                    "win_rate": round(b["wins"] / b["n"], 3),
+                    "total_pnl": round(b["pnl"], 2),
+                    "avg_pnl_per_trade": round(b["pnl"] / b["n"], 3),
+                })
+        return report
+
 
 _logger_instance = ShadowLogger()
 
