@@ -161,6 +161,22 @@ HTML = """
       <div class="value yellow">{{ stats.paper_v2.open_count }}</div>
     </div>
   </div>
+  {% if stats.paper_v2.by_band %}
+  <div class="divider"></div>
+  <table>
+    <tr><th>Banda</th><th>Trades</th><th>Wins</th><th>Win Rate</th></tr>
+    {% for band_name, b in stats.paper_v2.by_band.items() %}
+    <tr>
+      <td>{{ band_name }}</td>
+      <td>{{ b.total }}</td>
+      <td>{{ b.wins }}</td>
+      <td class="{{ 'green' if b.total and b.wins / b.total >= 0.6 else 'red' if b.total else '' }}">
+        {{ "%.1f"|format(b.wins / b.total * 100 if b.total else 0) }}%
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% endif %}
 </div>
 {% endif %}
 
