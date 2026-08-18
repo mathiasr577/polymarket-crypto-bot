@@ -211,8 +211,51 @@ def _tick(scanner, feed, paper, live, shadow=None, chainlink=None, paper_v2=None
 
         asset = market["asset"]
 
+        # v2 (TWAP + bandas de precio) y el shadow-logger NO dependen del
+        # feed de Kraken para nada — evaluarlos acá, ANTES de los checks de
+        # Kraken de más abajo. Antes estaban después de esos checks, así
+        # que un hipo momentáneo de Kraken (rate limit, red) dejaba ciego
+        # de paso a v2 y al shadow-logger, aunque ninguno de los dos use
+        # ese feed — justo lo contrario del punto de haber migrado a TWAP.
+        # Encontrado en revisión de código, 17-ago-2026.
+        window_ts = int(time.time() // 300) * 300
+
+        if paper_v2 and chainlink and market_id not in paper_v2_open:
+            try:
+                snap = chainlink.get_snapshot(asset)
+                w60 = chainlink.get_window_twap(asset, 60, window_ts)
+                snap["twap60_open"] = w60.get("open")
+                if order_flow:
+                    snap["ofi_15s"] = order_flow.get_ofi(asset, 15).get("ofi")
+                snap["pressure_integral"] = chainlink.get_pressure(asset, window_ts).get("integral")
+                signal_v2 = generate_signal_v2(snap, market)
+                if not signal_v2["blocked"]:
+                    v2_asset_open = [p for p in paper_v2.open_positions.values() if p.get("asset") == asset]
+                    if not v2_asset_open:
+                        paper_v2.open_trade(
+                            market_id=str(market_id),
+                            title=market["title"],
+                            asset=asset,
+                            side=signal_v2["side"],
+                            price=signal_v2["entry_price"],
+                            band=signal_v2["band"],
+                            reasons=signal_v2["reasons"],
+                        )
+            except Exception as e:
+                logger.debug(f"Signal v2 error [{asset}]: {e}")
+
+        # -- A partir de acá, todo lo que sigue SÍ depende de Kraken (v1) --
+
         indicators = feed.get_indicators(asset)
         if indicators is None:
+            # Igual logueamos shadow con lo que hay (TWAP/OFI/presión),
+            # aunque falten los campos de Kraken — mejor un hueco parcial
+            # (data_gap ya lo marca) que perder la fila entera.
+            if shadow and chainlink:
+                try:
+                    shadow.log_decision(market, {}, {}, chainlink, window_ts, market.get("ref_price"), order_flow_feed=order_flow)
+                except Exception as e:
+                    logger.debug(f"Shadow log_decision (sin Kraken) error: {e}")
             continue
 
         ref_from_feed = feed.get_current_window_ref(asset)
@@ -235,38 +278,9 @@ def _tick(scanner, feed, paper, live, shadow=None, chainlink=None, paper_v2=None
 
         if shadow and chainlink:
             try:
-                window_ts = int(time.time() // 300) * 300
                 shadow.log_decision(market, indicators, signal, chainlink, window_ts, market.get("ref_price"), order_flow_feed=order_flow)
             except Exception as e:
                 logger.debug(f"Shadow log_decision error: {e}")
-
-        # Modelo v2 (TWAP + bandas de precio) — independiente de v1, se
-        # evalúa siempre, aunque v1 esté bloqueado. Nunca toca plata real,
-        # solo paper_v2 (ver paper_trader_v2.py).
-        if paper_v2 and chainlink and market_id not in paper_v2_open:
-            try:
-                window_ts = int(time.time() // 300) * 300
-                snap = chainlink.get_snapshot(asset)
-                w60 = chainlink.get_window_twap(asset, 60, window_ts)
-                snap["twap60_open"] = w60.get("open")
-                if order_flow:
-                    snap["ofi_15s"] = order_flow.get_ofi(asset, 15).get("ofi")
-                snap["pressure_integral"] = chainlink.get_pressure(asset, window_ts).get("integral")
-                signal_v2 = generate_signal_v2(snap, market)
-                if not signal_v2["blocked"]:
-                    v2_asset_open = [p for p in paper_v2.open_positions.values() if p.get("asset") == asset]
-                    if not v2_asset_open:
-                        paper_v2.open_trade(
-                            market_id=str(market_id),
-                            title=market["title"],
-                            asset=asset,
-                            side=signal_v2["side"],
-                            price=signal_v2["entry_price"],
-                            band=signal_v2["band"],
-                            reasons=signal_v2["reasons"],
-                        )
-            except Exception as e:
-                logger.debug(f"Signal v2 error [{asset}]: {e}")
 
         if signal["blocked"]:
             logger.info(f"Blocked [{asset.upper()} T-{seconds_left:.0f}s]: {signal['block_reason']}")
