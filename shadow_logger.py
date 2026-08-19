@@ -1538,6 +1538,86 @@ class ShadowLogger:
                 })
         return report
 
+    def simulate_confirmation_weighted_sizing(self, base_stake=5.0, fee=0.07) -> dict:
+        """get_confirmation_report() ya mostró que más confirmaciones (0-3)
+        predicen mejor calidad DENTRO de las bandas que v2 ya tradea (66.8%
+        con 0, 92.3% con 3) — no solo para decidir si tradear la zona media.
+        Hoy se apuesta siempre el mismo monto sin importar cuántas
+        confirmaciones haya. Esto compara, en dólares reales sobre TODO el
+        historial (barata + media confirmada + favorita), apostar plano
+        vs. escalar el tamaño según el número de confirmaciones."""
+        if not self.conn:
+            return {}
+        try:
+            with self.conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute("""
+                    SELECT actual_outcome, polymarket_up_price, polymarket_down_price,
+                           twap60_open, twap60_now, chainlink_spot_now,
+                           ofi_15s, twap_pressure_integral
+                    FROM shadow_decisions
+                    WHERE resolved_at IS NOT NULL AND NOT data_gap
+                      AND twap60_open IS NOT NULL AND twap60_now IS NOT NULL
+                """)
+                rows = cur.fetchall()
+        except Exception as e:
+            logger.error(f"Confirmation-weighted sizing error: {e}")
+            return {}
+
+        # Misma política que ya corre en signal_engine_v2.py: banda barata
+        # con filtro de magnitud, media confirmada con 2+, favorita 0.75-0.97.
+        cases = []
+        for row in rows:
+            diff = row["twap60_now"] - row["twap60_open"]
+            if diff == 0 or not row["twap60_open"]:
+                continue
+            side = "UP" if diff > 0 else "DOWN"
+            price = row["polymarket_up_price"] if side == "UP" else row["polymarket_down_price"]
+            if price is None or price <= 0 or price >= 1:
+                continue
+
+            count = 0
+            if row["chainlink_spot_now"] is not None:
+                lead_diff = row["chainlink_spot_now"] - row["twap60_now"]
+                if lead_diff != 0 and (("UP" if lead_diff > 0 else "DOWN") == side):
+                    count += 1
+            if row["ofi_15s"] is not None and row["ofi_15s"] != 0:
+                if (("UP" if row["ofi_15s"] > 0 else "DOWN") == side):
+                    count += 1
+            if row["twap_pressure_integral"] is not None and row["twap_pressure_integral"] != 0:
+                if (("UP" if row["twap_pressure_integral"] > 0 else "DOWN") == side):
+                    count += 1
+
+            if price < 0.55:
+                rel_mag = abs(diff / row["twap60_open"])
+                if rel_mag < 0.0001:
+                    continue
+            elif 0.75 <= price < 0.97:
+                pass
+            elif 0.55 <= price < 0.75:
+                if count < 2:
+                    continue
+            else:
+                continue
+
+            win = side == row["actual_outcome"]
+            cases.append((price, win, count))
+
+        def run(size_fn):
+            n = 0
+            pnl = 0.0
+            for price, win, count in cases:
+                stake = size_fn(count)
+                pnl += stake * ((1 - price) / price) * (1 - fee) if win else -stake
+                n += 1
+            return {"n": n, "total_pnl": round(pnl, 2), "avg_pnl_per_trade": round(pnl / n, 3) if n else None}
+
+        return {
+            "flat_baseline": run(lambda c: base_stake),
+            "linear_0.5x_per_confirmation": run(lambda c: base_stake * (1 + 0.5 * c)),
+            "linear_1x_per_confirmation": run(lambda c: base_stake * (1 + 1.0 * c)),
+            "only_3_confirmations_double": run(lambda c: base_stake * 2 if c == 3 else base_stake),
+        }
+
 
 _logger_instance = ShadowLogger()
 
