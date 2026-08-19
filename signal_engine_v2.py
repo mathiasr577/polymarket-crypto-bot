@@ -80,6 +80,20 @@ MID_ZONE_MAX = 0.75
 MID_ZONE_MIN_CONFIRMATIONS = 2
 TRADE_MID_ZONE = True
 
+# Sizing por confirmaciones (19-ago-2026): get_confirmation_report() mostró
+# que más confirmaciones predicen mejor calidad TAMBIÉN dentro de las
+# bandas que ya tradeamos (66.8% con 0, 92.3% con 3) — no solo sirve para
+# decidir SI tradear la zona media. Confirmado con backtest de plata real
+# en /api/shadow-sizing: escalar el tamaño 0.5x por confirmación casi
+# duplica la plata total vs. apostar siempre lo mismo ($2735 vs $1384 en
+# 2154 trades). Se eligió el multiplicador MODERADO (0.5x) sobre uno más
+# agresivo (1x, que backtesteaba incluso mejor) a propósito: un backtest
+# siempre se va a ver mejor escalando más fuerte hacia el subconjunto que
+# ya sabemos que rinde mejor — eso no lo hace la elección más sensata para
+# arrancar, sobre todo con la ejecución real todavía sin probar. Empieza
+# aplicándose solo en paper (paper_trader_v2.py), no en plata real todavía.
+STAKE_MULTIPLIER_PER_CONFIRMATION = 0.5
+
 ENTRY_WINDOW_START = 120   # mismos límites de tiempo que v1 — los datos de
 ENTRY_WINDOW_END = 55      # shadow_logger se recolectaron en esta ventana,
                             # así que el backtest solo es válido si v2 opera
@@ -142,6 +156,8 @@ def generate_signal_v2(chainlink_snapshot: dict, market: dict) -> dict:
         "token_id": None,
         "entry_price": None,
         "band": None,
+        "confirmations": None,
+        "stake_multiplier": 1.0,
     }
 
     seconds_left = market.get("seconds_left", 300)
@@ -182,6 +198,10 @@ def generate_signal_v2(chainlink_snapshot: dict, market: dict) -> dict:
         result["block_reason"] = "No price available"
         return result
 
+    # Se cuenta siempre, no solo para la zona media — sirve para sizing en
+    # cualquier banda (ver STAKE_MULTIPLIER_PER_CONFIRMATION arriba).
+    confirmations, confirm_detail = _count_confirmations(chainlink_snapshot, side)
+
     if price < CHEAP_MAX:
         band = "cheap"
         rel_delta = abs(diff / twap60_open) if twap60_open else 0
@@ -207,7 +227,6 @@ def generate_signal_v2(chainlink_snapshot: dict, market: dict) -> dict:
             result["blocked"] = True
             result["block_reason"] = "Mid zone (0.55-0.75) deshabilitada"
             return result
-        confirmations, confirm_detail = _count_confirmations(chainlink_snapshot, side)
         if confirmations < MID_ZONE_MIN_CONFIRMATIONS:
             result["blocked"] = True
             result["block_reason"] = (
@@ -229,9 +248,12 @@ def generate_signal_v2(chainlink_snapshot: dict, market: dict) -> dict:
     token_id = market["tokens"].get(side)
     result["side"] = side
     result["confidence"] = "HIGH" if band in ("cheap", "mid_confirmed") else "MEDIUM"
-    reason = f"TWAP60 delta={diff:+.4f} -> {side}, price={price:.2f} band={band}"
-    if band == "mid_confirmed":
-        reason += f" confirmations={confirmations} ({confirm_detail})"
+    result["confirmations"] = confirmations
+    result["stake_multiplier"] = round(1 + STAKE_MULTIPLIER_PER_CONFIRMATION * confirmations, 2)
+    reason = (
+        f"TWAP60 delta={diff:+.4f} -> {side}, price={price:.2f} band={band} "
+        f"confirmations={confirmations} ({confirm_detail}) stake_x={result['stake_multiplier']}"
+    )
     result["reasons"] = [reason]
     result["token_id"] = token_id
     result["entry_price"] = price

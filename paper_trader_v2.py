@@ -113,14 +113,18 @@ class PaperTraderV2:
         except Exception as e:
             logger.error(f"PaperTraderV2 save balance error: {e}")
 
-    def open_trade(self, market_id, title, asset, side, price, band, reasons) -> bool:
+    def open_trade(self, market_id, title, asset, side, price, band, reasons, stake_multiplier=1.0) -> bool:
+        """stake_multiplier: escala STAKE según cuántas señales de
+        confirmación (D_lead/OFI/presión TWAP) coinciden con la dirección —
+        ver STAKE_MULTIPLIER_PER_CONFIRMATION en signal_engine_v2.py y el
+        backtest en /api/shadow-sizing. 1.0 = comportamiento de siempre."""
         with self._lock:
             if market_id in self.open_positions:
                 return False
             if len(self.open_positions) >= 5:
                 logger.debug("PaperTraderV2: max simultaneous positions reached")
                 return False
-            size = STAKE
+            size = round(STAKE * stake_multiplier, 2)
             if size > self.balance:
                 logger.debug("PaperTraderV2: insufficient balance")
                 return False

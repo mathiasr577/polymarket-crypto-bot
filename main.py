@@ -253,6 +253,7 @@ def _tick(scanner, feed, paper, live, shadow=None, chainlink=None, paper_v2=None
                                 price=signal_v2["entry_price"],
                                 band=signal_v2["band"],
                                 reasons=signal_v2["reasons"],
+                                stake_multiplier=signal_v2.get("stake_multiplier", 1.0),
                             )
 
                     # Live v2 — solo si LIVE_V2_ENABLED, y mismo horario que
