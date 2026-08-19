@@ -138,6 +138,26 @@ HTML = """
 </div>
 {% endif %}
 
+{% if stats.live_v1 is defined %}
+<div class="section">
+  <h2>🔴 Live v1 (modelo viejo — plata real, corriendo aparte de v2)</h2>
+  <div class="grid">
+    <div class="card">
+      <div class="label">Balance v1</div>
+      <div class="value blue">${{ "%.2f"|format(stats.live_v1.balance) }}</div>
+    </div>
+    <div class="card">
+      <div class="label">P&L v1</div>
+      <div class="value {{ 'green' if stats.live_v1.pnl >= 0 else 'red' }}">${{ "%+.2f"|format(stats.live_v1.pnl) }}</div>
+    </div>
+    <div class="card">
+      <div class="label">Win rate v1</div>
+      <div class="value">{{ "%.1f"|format(stats.live_v1.win_rate) }}%</div>
+    </div>
+  </div>
+</div>
+{% endif %}
+
 {% if stats.paper_v2 is defined %}
 <div class="section">
   <h2>🧪 Paper trading v2 (TWAP + bandas de precio — simulado, en paralelo)</h2>
@@ -467,6 +487,8 @@ def create_dashboard(get_stats_fn, get_prices_fn, get_markets_fn=None, mode="PAP
             stats["paper"] = type("P", (), dict(stats["paper"]))()
         if "paper_v2" in stats:
             stats["paper_v2"] = type("P2", (), dict(stats["paper_v2"]))()
+        if "live_v1" in stats:
+            stats["live_v1"] = type("LV1", (), dict(stats["live_v1"]))()
 
         return render_template_string(
             HTML,

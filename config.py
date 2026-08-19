@@ -42,3 +42,13 @@ PORT = int(os.environ.get("PORT", 5000))
 # trading real, sin tocar ninguna decisión. Kill switch por si el feed RTDS
 # da problemas en producción — no afecta paper/live si se apaga.
 SHADOW_MODE_ENABLED = os.environ.get("SHADOW_MODE_ENABLED", "true").lower() == "true"
+
+# Frenos explícitos para plata real, independientes de PAPER_TRADING.
+# PAPER_TRADING=false por sí solo YA NO alcanza para que ningún modelo
+# arriesgue plata real — cada uno necesita además su propio flag en true.
+# Por qué: v1 es el modelo viejo que confirmamos que pierde plata — no
+# queremos que se reactive solo por accidente al apagar el modo paper para
+# probar v2. Los dos arrancan en false por defecto (nada cambia con este
+# deploy hasta que se toquen las variables de entorno en Railway a mano).
+LIVE_V1_ENABLED = os.environ.get("LIVE_V1_ENABLED", "false").lower() == "true"
+LIVE_V2_ENABLED = os.environ.get("LIVE_V2_ENABLED", "false").lower() == "true"

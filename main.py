@@ -18,9 +18,12 @@ from signal_engine import generate_signal, kelly_size, ENTRY_WINDOW_START, ENTRY
 from paper_trader import get_trader
 from dashboard import create_dashboard
 
-# Live trader imports
+# Live trader imports — importar el módulo no alcanza para arriesgar plata
+# real: cada uno además necesita su propio LIVE_V1_ENABLED/LIVE_V2_ENABLED
+# explícito (ver config.py) antes de que trading_loop() lo instancie de verdad.
 if not config.PAPER_TRADING:
     from live_trader import get_live_trader
+    from live_trader_v2 import get_live_trader_v2
 
 # Shadow-mode: registra Chainlink TWAP/spot en paralelo, sin tocar trading.
 if config.SHADOW_MODE_ENABLED:
@@ -122,18 +125,22 @@ def trading_loop():
     scanner = get_scanner()
     feed = get_feed()
     paper = get_trader()
-    live = get_live_trader() if not config.PAPER_TRADING else None
+    live = get_live_trader() if (not config.PAPER_TRADING and config.LIVE_V1_ENABLED) else None
+    live_v2 = get_live_trader_v2() if (not config.PAPER_TRADING and config.LIVE_V2_ENABLED) else None
     shadow = get_shadow_logger() if config.SHADOW_MODE_ENABLED else None
     chainlink = get_chainlink_feed() if config.SHADOW_MODE_ENABLED else None
     paper_v2 = get_trader_v2() if config.SHADOW_MODE_ENABLED else None
     order_flow = get_order_flow_feed() if config.SHADOW_MODE_ENABLED else None
 
-    logger.info(f"Trading loop started — mode: {'LIVE' if live else 'PAPER'} — warming up 60s...")
+    mode_desc = "LIVE-v1" if live else ("LIVE-v2" if live_v2 else "PAPER")
+    if live and live_v2:
+        mode_desc = "LIVE-v1+v2"
+    logger.info(f"Trading loop started — mode: {mode_desc} — warming up 60s...")
     time.sleep(60)
 
     while True:
         try:
-            _tick(scanner, feed, paper, live, shadow, chainlink, paper_v2, order_flow)
+            _tick(scanner, feed, paper, live, shadow, chainlink, paper_v2, order_flow, live_v2)
         except Exception as e:
             logger.error(f"Tick error: {e}")
         time.sleep(10)
@@ -161,7 +168,7 @@ def _cross_asset_confirm(feed, asset: str) -> str | None:
     return None
 
 
-def _tick(scanner, feed, paper, live, shadow=None, chainlink=None, paper_v2=None, order_flow=None):
+def _tick(scanner, feed, paper, live, shadow=None, chainlink=None, paper_v2=None, order_flow=None, live_v2=None):
     resolve_expired(paper)
 
     if paper_v2:
@@ -184,6 +191,9 @@ def _tick(scanner, feed, paper, live, shadow=None, chainlink=None, paper_v2=None
                 f"WinRate={stats['win_rate']:.1f}%"
             )
 
+    if live_v2:
+        resolve_live_expired(live_v2)  # misma función genérica
+
     # Live trading solo corre 9AM-6PM ET (1PM-10PM UTC) — probado y
     # descartado el trading 24/7 en vivo por baja liquidez de madrugada.
     # Paper trading no arriesga plata real, así que corre siempre: da más
@@ -199,6 +209,7 @@ def _tick(scanner, feed, paper, live, shadow=None, chainlink=None, paper_v2=None
     paper_open = set(paper.open_positions.keys())
     live_open = set(live.open_positions.keys()) if live else set()
     paper_v2_open = set(paper_v2.open_positions.keys()) if paper_v2 else set()
+    live_v2_open = set(live_v2.open_positions.keys()) if live_v2 else set()
 
     for market in markets:
         market_id = market["id"]
@@ -220,7 +231,7 @@ def _tick(scanner, feed, paper, live, shadow=None, chainlink=None, paper_v2=None
         # Encontrado en revisión de código, 17-ago-2026.
         window_ts = int(time.time() // 300) * 300
 
-        if paper_v2 and chainlink and market_id not in paper_v2_open:
+        if chainlink and (paper_v2 or live_v2):
             try:
                 snap = chainlink.get_snapshot(asset)
                 w60 = chainlink.get_window_twap(asset, 60, window_ts)
@@ -229,18 +240,42 @@ def _tick(scanner, feed, paper, live, shadow=None, chainlink=None, paper_v2=None
                     snap["ofi_15s"] = order_flow.get_ofi(asset, 15).get("ofi")
                 snap["pressure_integral"] = chainlink.get_pressure(asset, window_ts).get("integral")
                 signal_v2 = generate_signal_v2(snap, market)
+
                 if not signal_v2["blocked"]:
-                    v2_asset_open = [p for p in paper_v2.open_positions.values() if p.get("asset") == asset]
-                    if not v2_asset_open:
-                        paper_v2.open_trade(
-                            market_id=str(market_id),
-                            title=market["title"],
-                            asset=asset,
-                            side=signal_v2["side"],
-                            price=signal_v2["entry_price"],
-                            band=signal_v2["band"],
-                            reasons=signal_v2["reasons"],
-                        )
+                    if paper_v2 and market_id not in paper_v2_open:
+                        v2_asset_open = [p for p in paper_v2.open_positions.values() if p.get("asset") == asset]
+                        if not v2_asset_open:
+                            paper_v2.open_trade(
+                                market_id=str(market_id),
+                                title=market["title"],
+                                asset=asset,
+                                side=signal_v2["side"],
+                                price=signal_v2["entry_price"],
+                                band=signal_v2["band"],
+                                reasons=signal_v2["reasons"],
+                            )
+
+                    # Live v2 — solo si LIVE_V2_ENABLED, y mismo horario que
+                    # v1 (9AM-6PM ET, probado y necesario por liquidez).
+                    if (trading_hours and live_v2 and market_id not in live_v2_open
+                            and live_v2.can_trade()):
+                        v2_live_asset_open = [p for p in live_v2.open_positions.values() if p.get("asset") == asset]
+                        if not v2_live_asset_open:
+                            logger.info(
+                                f"🔴 Attempting LIVE v2 trade: {signal_v2['side']} {asset.upper()} "
+                                f"band={signal_v2['band']} @ {signal_v2['entry_price']:.2f}"
+                            )
+                            live_v2.open_trade(
+                                market_id=str(market_id),
+                                title=market["title"],
+                                asset=asset,
+                                side=signal_v2["side"],
+                                price=signal_v2["entry_price"],
+                                token_id=signal_v2["token_id"],
+                                band=signal_v2["band"],
+                                reasons=signal_v2["reasons"],
+                                tokens=market["tokens"],
+                            )
             except Exception as e:
                 logger.debug(f"Signal v2 error [{asset}]: {e}")
 
@@ -337,14 +372,29 @@ def get_prices_snapshot():
 
 def get_combined_stats():
     """En modo live, el dashboard debe mostrar como stats PRINCIPALES las de
-    live_trader (plata real) — antes se devolvía paper_stats como base y las
-    de live quedaban anidadas en stats["live"], que el template nunca lee.
-    Resultado: el dashboard mostraba el P&L/win-rate/trades de paper (miles
-    de dólares simulados) bajo el banner "LIVE TRADING", sin ningún indicio
-    de que esos números no eran reales. Ahora paper queda anidado y
-    claramente etiquetado en su propia sección."""
+    quien esté arriesgando plata real de verdad — antes se devolvía
+    paper_stats como base y las de live quedaban anidadas en stats["live"],
+    que el template nunca lee. Resultado: el dashboard mostraba el
+    P&L/win-rate/trades de paper (miles de dólares simulados) bajo el
+    banner "LIVE TRADING", sin ningún indicio de que esos números no eran
+    reales. Ahora paper queda anidado y claramente etiquetado.
+
+    Con LIVE_V1_ENABLED/LIVE_V2_ENABLED, "plata real de verdad" ya no es
+    simplemente "not PAPER_TRADING" — puede haber ninguno, uno, o los dos
+    modelos arriesgando plata real a la vez. v2 tiene prioridad como base
+    si está activo (es el modelo que se validó y hacia el que se migró),
+    con v1 anidado si también corre; si solo corre v1, v1 es la base
+    (compatibilidad con el comportamiento de antes)."""
     paper_stats = get_trader().get_stats()
-    if not config.PAPER_TRADING:
+    live_v1_active = (not config.PAPER_TRADING) and config.LIVE_V1_ENABLED
+    live_v2_active = (not config.PAPER_TRADING) and config.LIVE_V2_ENABLED
+
+    if live_v2_active:
+        base = get_live_trader_v2().get_stats()
+        base["paper"] = paper_stats
+        if live_v1_active:
+            base["live_v1"] = get_live_trader().get_stats()
+    elif live_v1_active:
         base = get_live_trader().get_stats()
         base["paper"] = paper_stats
     else:
@@ -356,11 +406,30 @@ def get_combined_stats():
 
 
 def main():
-    mode_label = "🔴 LIVE TRADING" if not config.PAPER_TRADING else "📄 PAPER TRADING"
+    live_v1_active = (not config.PAPER_TRADING) and config.LIVE_V1_ENABLED
+    live_v2_active = (not config.PAPER_TRADING) and config.LIVE_V2_ENABLED
+    any_live = live_v1_active or live_v2_active
+
+    if live_v1_active and live_v2_active:
+        mode_label = "🔴 LIVE TRADING (v1+v2)"
+    elif live_v2_active:
+        mode_label = "🔴 LIVE TRADING (v2)"
+    elif live_v1_active:
+        mode_label = "🔴 LIVE TRADING (v1)"
+    elif not config.PAPER_TRADING:
+        # PAPER_TRADING=false pero ningún LIVE_V*_ENABLED prendido — no
+        # arriesga plata real igual, PAPER_TRADING solo ya no alcanza.
+        mode_label = "📄 PAPER TRADING (PAPER_TRADING=false pero sin LIVE_V1/V2_ENABLED)"
+    else:
+        mode_label = "📄 PAPER TRADING"
+
     logger.info(f"Starting — mode: {mode_label}")
 
-    if not config.PAPER_TRADING:
-        logger.info("⚠️  LIVE TRADING ACTIVE — Real money will be used")
+    if any_live:
+        logger.info(
+            f"⚠️  LIVE TRADING ACTIVE — Real money will be used "
+            f"(v1={live_v1_active}, v2={live_v2_active})"
+        )
 
     start_feed()
     start_scanner()
