@@ -189,7 +189,14 @@ class LiveTraderV2:
                 for row in cur.fetchall():
                     self.open_positions[row["market_id"]] = dict(row)
 
-                cur.execute("SELECT COUNT(*) as n FROM live_trades_v2 WHERE resolved_at IS NOT NULL")
+                # total_trades cuenta CUALQUIER fila insertada (fills reales,
+                # se inserta solo en el camino de éxito de _execute_order) —
+                # no solo las resueltas. Un restart de Railway a mitad de día
+                # con posiciones todavía abiertas las hubiera dejado afuera
+                # del conteo para siempre (nunca se re-suman al resolverse,
+                # solo _execute_order incrementa total_trades). Encontrado en
+                # la revisión final antes de ir a plata real.
+                cur.execute("SELECT COUNT(*) as n FROM live_trades_v2")
                 self.total_trades = cur.fetchone()["n"] or 0
             logger.info(
                 f"LiveTraderV2 state restored: day_start_balance={self.day_start_balance} "
