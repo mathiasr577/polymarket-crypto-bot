@@ -1,6 +1,7 @@
 """
 Real order executor — only used when PAPER_TRADING=false
-Uses LIMIT order with 3% slippage tolerance.
+Uses LIMIT order with a configurable slippage tolerance (default 3%,
+see place_order's max_slippage_pct).
 Leaves order open for 55s — Polymarket cancels automatically at market close.
 """
 import logging
@@ -44,9 +45,12 @@ def get_client():
 
 
 def place_order(token_id: str, price: float, size: float, side: str = "BUY",
-                alt_token_id: str = None) -> dict:
+                alt_token_id: str = None, max_slippage_pct: float = 0.03) -> dict:
     """
-    Place LIMIT order with 3% slippage tolerance.
+    Place LIMIT order with max_slippage_pct tolerance (default 3%, same as
+    before — pasar un valor más chico donde los centavos de precio importan
+    más, ej. precios altos donde el margen esperado por trade es de pocos
+    centavos y un 3% se lo come; ver live_trader_v2.py TIGHT_SLIPPAGE_PCT).
     size = dollars to spend (e.g. 5.0 = $5)
     Leaves order open for 55s max — Polymarket cancels at close if not filled.
     """
@@ -58,7 +62,7 @@ def place_order(token_id: str, price: float, size: float, side: str = "BUY",
         logger.warning(f"Scanner price {price:.2f} out of range — skipping")
         return {"error": f"scanner price out of range: {price:.2f}"}
 
-    limit_price = round(min(price * 1.03, MAX_PRICE), 2)
+    limit_price = round(min(price * (1 + max_slippage_pct), MAX_PRICE), 2)
     # size is dollars, convert to shares
     shares = round(size / price, 2)
 

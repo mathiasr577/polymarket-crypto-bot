@@ -44,6 +44,38 @@ MAX_NO_FILLS_HISTORY = 20
 TARGET_RISK_PCT = 0.08
 MIN_TRADE_USD = 2.0
 
+# Fase temprana de plata real (20-ago-2026, revisión pre-lanzamiento con la
+# otra IA): el primer día no valida el modelo — valida que la EJECUCIÓN real
+# (fills, fees, slippage, latencia) se comporte como el backtest/paper
+# asumieron, cosa que nunca se probó con plata real de este modelo. Se
+# define por cantidad de fills reales (no por fecha/calendario) para que se
+# auto-expire solo apenas se junten operaciones limpias, sin depender de que
+# alguien se acuerde de aflojar un flag a mano:
+#   - primeras EARLY_PHASE_FLAT_TRADES: tamaño fijo chico (aísla el efecto
+#     de la ejecución del efecto del sizing proporcional/por confirmaciones)
+#   - primeras EARLY_PHASE_SINGLE_POSITION_TRADES: como mucho 1 posición
+#     abierta a la vez (más fácil de seguir a mano trade por trade)
+#   - mientras dure la fase flat: circuit breaker en dólares absolutos, más
+#     estricto que el 25% normal (~-$26 con el balance de hoy) — un bug de
+#     ejecución se corta con poca plata en juego, no después de perder un
+#     cuarto de la cuenta.
+EARLY_PHASE_FLAT_TRADES = 20
+EARLY_PHASE_FLAT_SIZE = 2.0
+EARLY_PHASE_SINGLE_POSITION_TRADES = 5
+EARLY_PHASE_MAX_LOSS_USD = 10.0
+
+# Slippage del LIMIT order (ver order_executor.py) por banda — antes era un
+# 3% fijo para cualquier precio. En la banda favorita (precio ~0.75-0.97) el
+# margen esperado es de centavos por trade (~$0.19-0.21 en $5, ver
+# signal_engine_v2.py), así que un 3% de slippage en ese rango de precio
+# (~2.5 centavos) se come más de la mitad del edge esperado. Preferible un
+# NO_FILL a convertir un trade con edge en uno sin edge (punto de la otra
+# IA, correcto). Banda barata mantiene 3% (ahí el mismo % son centésimas de
+# centavo, no material).
+DEFAULT_SLIPPAGE_PCT = 0.03
+TIGHT_SLIPPAGE_PCT = 0.015
+_TIGHT_SLIPPAGE_BANDS = ("favorite", "mid_confirmed")
+
 ET_OFFSET = timedelta(hours=-4)  # mismo offset fijo que usa el resto del código
 
 _FILL_PRICE_FIELDS = ("price", "avgPrice", "average_price", "averagePrice", "fillPrice", "fill_price")
@@ -252,21 +284,38 @@ class LiveTraderV2:
         with self._lock:
             if (
                 self._client is None or
-                self.total_trades >= MAX_LIVE_TRADES or
-                len(self.open_positions) >= 2
+                self.total_trades >= MAX_LIVE_TRADES
             ):
                 return False
+
+            max_open = 1 if self.total_trades < EARLY_PHASE_SINGLE_POSITION_TRADES else 2
+            if len(self.open_positions) >= max_open:
+                return False
+
             if self.day_start_balance and self.day_start_balance > 0:
-                drawdown = -self.today_pnl / self.day_start_balance
-                if drawdown >= DRAWDOWN_LIMIT:
-                    if not self._drawdown_paused:
-                        self._drawdown_paused = True
-                        self._save_day_state()
-                        logger.warning(
-                            f"LiveTraderV2 drawdown limit hit: -{drawdown*100:.1f}% of today's "
-                            f"start balance (${self.day_start_balance:.2f}) — pausing until tomorrow"
-                        )
-                    return False
+                if self.total_trades < EARLY_PHASE_FLAT_TRADES:
+                    if self.today_pnl <= -EARLY_PHASE_MAX_LOSS_USD:
+                        if not self._drawdown_paused:
+                            self._drawdown_paused = True
+                            self._save_day_state()
+                            logger.warning(
+                                f"LiveTraderV2 EARLY-PHASE loss limit hit: ${self.today_pnl:.2f} "
+                                f"<= -${EARLY_PHASE_MAX_LOSS_USD:.2f} (trade #{self.total_trades}, "
+                                f"fase temprana de ejecución) — pausando el resto del día para "
+                                f"revisión manual."
+                            )
+                        return False
+                else:
+                    drawdown = -self.today_pnl / self.day_start_balance
+                    if drawdown >= DRAWDOWN_LIMIT:
+                        if not self._drawdown_paused:
+                            self._drawdown_paused = True
+                            self._save_day_state()
+                            logger.warning(
+                                f"LiveTraderV2 drawdown limit hit: -{drawdown*100:.1f}% of today's "
+                                f"start balance (${self.day_start_balance:.2f}) — pausing until tomorrow"
+                            )
+                        return False
             return True
 
     def record_blocked(self):
@@ -275,7 +324,10 @@ class LiveTraderV2:
 
     def _current_trade_size(self) -> float:
         with self._lock:
+            total = self.total_trades
             balance = (self.day_start_balance or 0) + self.today_pnl
+        if total < EARLY_PHASE_FLAT_TRADES:
+            return EARLY_PHASE_FLAT_SIZE
         if balance <= 0:
             return MIN_TRADE_USD
         size = balance * TARGET_RISK_PCT
@@ -330,12 +382,14 @@ class LiveTraderV2:
                 alt_side = "DOWN" if side == "UP" else "UP"
                 alt_token_id = tokens.get(alt_side)
 
+            slippage_pct = TIGHT_SLIPPAGE_PCT if band in _TIGHT_SLIPPAGE_BANDS else DEFAULT_SLIPPAGE_PCT
             resp = place_order(
                 token_id=token_id,
                 price=round(price, 2),
                 size=intended_size,
                 side="BUY",
                 alt_token_id=alt_token_id,
+                max_slippage_pct=slippage_pct,
             )
 
             latency = time.time() - t0
@@ -357,8 +411,18 @@ class LiveTraderV2:
                         self.unknown_fills.append({
                             "market_id": market_id, "asset": asset, "side": side, "band": band,
                             "order_id": resp.get("order_id"), "price": price,
+                            "size": intended_size,
                             "time": datetime.now(timezone.utc).strftime("%H:%M UTC"),
                         })
+                        # Se asume el PEOR caso para el circuit breaker de HOY: que
+                        # la orden sí se llenó y se perdió por completo. Antes esto
+                        # no tocaba today_pnl, así que si de verdad se había llenado
+                        # y perdido, el drawdown del día quedaba ciego a esa pérdida
+                        # hasta el balance real del día siguiente — encontrado en
+                        # revisión (20-ago-2026). Conservador a propósito: en el peor
+                        # caso pausamos de más un día que sí iba bien; nunca al revés.
+                        self.today_pnl -= intended_size
+                    self._save_day_state()
                     return
 
                 if "not filled" in error_msg or "cancelled" in error_msg:
@@ -479,11 +543,28 @@ class LiveTraderV2:
                     by_asset[a]["wins"] += 1
 
                 b = r.get("band", "unknown")
-                by_band.setdefault(b, {"total": 0, "wins": 0, "pnl": 0.0})
+                by_band.setdefault(b, {"total": 0, "wins": 0, "pnl": 0.0, "_slip_sum": 0.0, "_slip_n": 0})
                 by_band[b]["total"] += 1
                 by_band[b]["pnl"] += r["pnl"]
                 if r["win"]:
                     by_band[b]["wins"] += 1
+                # Slippage real de ejecución: precio de fill vs precio de decisión,
+                # como % del precio de decisión. Es exactamente lo que la otra IA
+                # pidió trackear por banda (los centavos pesan distinto en cheap
+                # vs favorite) — ya teníamos price/decision_price guardados por
+                # trade, solo faltaba resumirlo.
+                dp = r.get("decision_price")
+                fp = r.get("price")
+                if dp and fp:
+                    by_band[b]["_slip_sum"] += (fp - dp) / dp
+                    by_band[b]["_slip_n"] += 1
+
+            for b, d in by_band.items():
+                d["avg_slippage_pct"] = round(d["_slip_sum"] / d["_slip_n"] * 100, 3) if d["_slip_n"] else None
+                del d["_slip_sum"]
+                del d["_slip_n"]
+
+            unknown_fill_assumed_loss = sum(u.get("size", 0) or 0 for u in self.unknown_fills)
 
             cash_balance = 0.0
             try:
@@ -513,12 +594,19 @@ class LiveTraderV2:
                 "blocked_count": self.blocked_count,
                 "recent_no_fills": list(self.recent_no_fills[:10]),
                 "unknown_fills": list(self.unknown_fills),
+                "unknown_fill_assumed_loss": unknown_fill_assumed_loss,
                 "by_asset": by_asset,
                 "by_band": by_band,
                 "balance": cash_balance,
                 "today_pnl": self.today_pnl,
                 "day_start_balance": self.day_start_balance,
                 "drawdown_paused": self._drawdown_paused,
+                "early_phase": {
+                    "flat_sizing_active": self.total_trades < EARLY_PHASE_FLAT_TRADES,
+                    "single_position_active": self.total_trades < EARLY_PHASE_SINGLE_POSITION_TRADES,
+                    "trades_until_normal_sizing": max(0, EARLY_PHASE_FLAT_TRADES - self.total_trades),
+                    "max_loss_usd": EARLY_PHASE_MAX_LOSS_USD,
+                },
             }
 
 
