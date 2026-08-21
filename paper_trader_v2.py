@@ -247,6 +247,54 @@ class PaperTraderV2:
 
         return stats
 
+    def get_today_by_band(self) -> dict:
+        """Mismo desglose por banda que get_stats(), pero filtrado a HOY
+        (UTC — el día de trading entero cae en un solo día calendario UTC,
+        ver TRADING_START_UTC/TRADING_END_UTC en config.py, así que no hace
+        falta el offset ET que usa live_trader_v2 para el rollover).
+        Construido 21-ago-2026 para poder comparar directamente el
+        resultado de HOY en paper (mismas señales, sin riesgo de ejecución)
+        contra el resultado de HOY en plata real — la pregunta concreta
+        era si un mal día en vivo también aparece en paper (día de mercado
+        raro para el modelo) o solo en vivo (algo de la ejecución real)."""
+        result = {"total_trades": 0, "wins": 0, "win_rate": 0, "total_pnl": 0, "by_band": {}}
+        if not self.conn:
+            return result
+        try:
+            with self.conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute("""
+                    SELECT COUNT(*) as total,
+                        COUNT(*) FILTER (WHERE win) as wins,
+                        SUM(pnl) as total_pnl
+                    FROM paper_trades_v2
+                    WHERE resolved_at IS NOT NULL AND resolved_at::date = (NOW() AT TIME ZONE 'UTC')::date
+                """)
+                row = cur.fetchone()
+                result["total_trades"] = row["total"] or 0
+                result["wins"] = row["wins"] or 0
+                result["win_rate"] = round(row["wins"] / row["total"] * 100, 1) if row["total"] else 0
+                result["total_pnl"] = round(float(row["total_pnl"] or 0), 2)
+
+                cur.execute("""
+                    SELECT band, COUNT(*) as n,
+                        COUNT(*) FILTER (WHERE win) as wins,
+                        SUM(pnl) as pnl
+                    FROM paper_trades_v2
+                    WHERE resolved_at IS NOT NULL AND resolved_at::date = (NOW() AT TIME ZONE 'UTC')::date
+                    GROUP BY band
+                """)
+                for r in cur.fetchall():
+                    n = r["n"] or 0
+                    result["by_band"][r["band"]] = {
+                        "n": n,
+                        "wins": r["wins"] or 0,
+                        "win_rate": round((r["wins"] or 0) / n * 100, 1) if n else 0,
+                        "pnl": round(float(r["pnl"] or 0), 2),
+                    }
+        except Exception as e:
+            logger.error(f"PaperTraderV2 get_today_by_band error: {e}")
+        return result
+
 
 _trader_v2 = PaperTraderV2()
 

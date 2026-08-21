@@ -586,6 +586,18 @@ def create_dashboard(get_stats_fn, get_prices_fn, get_markets_fn=None, mode="PAP
     def api_shadow_sizing():
         return jsonify(get_shadow_sizing_fn() if get_shadow_sizing_fn else {})
 
+    @app.route("/api/paper-v2-today")
+    def api_paper_v2_today():
+        """Desglose de paper v2 (mismas señales que live, sin riesgo real)
+        filtrado a solo HOY, por banda — para comparar directo contra un
+        día específico de plata real sin mezclar con el histórico completo.
+        Ver PaperTraderV2.get_today_by_band()."""
+        try:
+            from paper_trader_v2 import get_trader_v2
+            return jsonify(get_trader_v2().get_today_by_band())
+        except Exception as e:
+            return jsonify({"error": str(e)})
+
     @app.route("/health")
     def health():
         return "OK"

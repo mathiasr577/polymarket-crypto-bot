@@ -529,7 +529,16 @@ class LiveTraderV2:
         with self._lock:
             wins = [r for r in self.results if r["win"]]
             losses = [r for r in self.results if not r["win"]]
-            total_pnl = sum(r["pnl"] for r in self.results)
+            unknown_fill_assumed_loss = sum(u.get("size", 0) or 0 for u in self.unknown_fills)
+            # total_pnl sumaba solo self.results (trades resueltos con fill
+            # confirmado) — un unknown_fill nunca entra ahí (no sabemos si
+            # se llenó), así que el P&L mostrado se veía mejor que la
+            # pérdida real de la cuenta cuando había uno. today_pnl ya lo
+            # asumía correctamente para el circuit breaker (ver open_trade);
+            # ahora el número que se MUESTRA también lo refleja, para que no
+            # contradiga el cash real de la wallet. Encontrado 21-ago-2026
+            # comparando este número contra el historial real de Polymarket.
+            total_pnl = sum(r["pnl"] for r in self.results) - unknown_fill_assumed_loss
             best = max((r["pnl"] for r in self.results), default=0)
             worst = min((r["pnl"] for r in self.results), default=0)
 
@@ -563,8 +572,6 @@ class LiveTraderV2:
                 d["avg_slippage_pct"] = round(d["_slip_sum"] / d["_slip_n"] * 100, 3) if d["_slip_n"] else None
                 del d["_slip_sum"]
                 del d["_slip_n"]
-
-            unknown_fill_assumed_loss = sum(u.get("size", 0) or 0 for u in self.unknown_fills)
 
             cash_balance = 0.0
             try:
