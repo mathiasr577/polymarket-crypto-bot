@@ -110,6 +110,28 @@ ALTER TABLE shadow_decisions ADD COLUMN IF NOT EXISTS ofi_5s FLOAT;
 ALTER TABLE shadow_decisions ADD COLUMN IF NOT EXISTS ofi_15s FLOAT;
 ALTER TABLE shadow_decisions ADD COLUMN IF NOT EXISTS ofi_30s FLOAT;
 ALTER TABLE shadow_decisions ADD COLUMN IF NOT EXISTS ofi_n_trades_30s INT;
+
+-- Parte 2 de la idea de "staleness económica" (22-ago-2026): shadow_decisions
+-- guarda UNA sola fila por mercado (ON CONFLICT market_id DO NOTHING), así
+-- que no alcanza para medir si el precio converge hacia nuestra dirección
+-- en los segundos siguientes a una señal. Esta tabla sí permite múltiples
+-- filas por mercado — una por tick, sin guard — para poder reconstruir esa
+-- trayectoria una vez que se acumulen unos días de datos. Solo para
+-- mercados donde el precio de nuestro lado ya está por debajo de
+-- PRICE_TICK_MAX_PRICE (ver log_price_tick) — no todo el universo de
+-- mercados, para no inflar la tabla con datos irrelevantes.
+CREATE TABLE IF NOT EXISTS shadow_price_ticks (
+    id SERIAL PRIMARY KEY,
+    market_id TEXT,
+    asset TEXT,
+    ts TIMESTAMPTZ DEFAULT NOW(),
+    seconds_remaining FLOAT,
+    side TEXT,
+    price FLOAT,
+    twap60_open FLOAT,
+    twap60_now FLOAT
+);
+CREATE INDEX IF NOT EXISTS idx_shadow_price_ticks_market ON shadow_price_ticks (market_id, ts);
 """
 
 
@@ -188,6 +210,38 @@ class ShadowLogger:
         except Exception as e:
             logger.error(f"ShadowLogger DB error: {e}")
             self.conn = None
+
+    PRICE_TICK_MAX_PRICE = 0.45  # un poco por arriba de la zona explosiva (<0.35) para capturar cómo llega ahí
+
+    def log_price_tick(self, market, twap60_open, twap60_now, seconds_remaining):
+        """Sin guard de 'una vez por mercado' a propósito — ver
+        shadow_price_ticks en el DDL. Se llama en cada tick desde main.py,
+        igual que log_decision, pero solo escribe si el precio de nuestro
+        lado está por debajo de PRICE_TICK_MAX_PRICE (si no, no es
+        relevante para esta pregunta y estaríamos escribiendo de más).
+        Falla en silencio (best-effort, nunca debe afectar la decisión de
+        trading) — igual que log_decision."""
+        if not self.conn or twap60_open is None or twap60_now is None or not twap60_open:
+            return
+        diff = twap60_now - twap60_open
+        if diff == 0:
+            return
+        side = "UP" if diff > 0 else "DOWN"
+        price = market.get("up_price") if side == "UP" else market.get("down_price")
+        if price is None or price >= self.PRICE_TICK_MAX_PRICE:
+            return
+        try:
+            with self.conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO shadow_price_ticks
+                    (market_id, asset, seconds_remaining, side, price, twap60_open, twap60_now)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s)
+                """, (
+                    str(market["id"]), market["asset"], market.get("seconds_left"),
+                    side, price, twap60_open, twap60_now,
+                ))
+        except Exception as e:
+            logger.debug(f"log_price_tick error [{market.get('asset')}]: {e}")
 
     def log_decision(self, market, indicators, signal, chainlink_feed, kraken_window_ts, kraken_ref_open, order_flow_feed=None):
         if not self.conn:
@@ -1604,6 +1658,159 @@ class ShadowLogger:
                     "avg_pnl_per_trade": round(b["pnl"] / b["n"], 3),
                 })
         return report
+
+    def get_repricing_deficit_report(self, price_max=0.35, min_rel_delta=0.0001, stake=5.0, fee=0.07,
+                                      min_history=15) -> dict:
+        """Parte 1 (estática/transversal) de la idea de "staleness económica"
+        sugerida por la otra IA (22-ago-2026): ¿el precio de Polymarket en
+        el momento de la señal está más barato de lo que HISTÓRICAMENTE
+        suele estar, dado el tamaño del movimiento de TWAP60 y el asset?
+        Si ese "déficit" predice acierto real más allá de lo que ya sabemos
+        por banda de precio sola, es evidencia real de sub-reacción del
+        mercado, no solo la aritmética de precio bajo.
+
+        Walk-forward real, no un split arbitrario: cada decisión calcula su
+        "precio esperado" usando SOLO decisiones anteriores (por orden de
+        market_open_timestamp) en su mismo bucket (asset, tamaño del
+        movimiento relativo de TWAP) — nunca mira el futuro. Los bordes de
+        los buckets de magnitud son fijos de antemano (no ajustados a los
+        datos), para no filtrar información del dataset completo hacia el
+        criterio de agrupación. Requiere al menos `min_history` casos
+        previos en el mismo bucket antes de confiar en el "esperado" — los
+        primeros casos de cada bucket quedan afuera del reporte a propósito
+        (no hay suficiente pasado todavía para juzgarlos).
+
+        NO es la prueba de convergencia (eso necesita múltiples fotos por
+        ventana en el tiempo, que hoy no logueamos — shadow_decisions solo
+        guarda una fila por mercado). Esto es más simple: un solo número de
+        "qué tan barato está vs. lo típico" en el momento de la señal."""
+        if not self.conn:
+            return {}
+        try:
+            with self.conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute("""
+                    SELECT actual_outcome, polymarket_up_price, polymarket_down_price,
+                           twap60_open, twap60_now, asset, market_open_timestamp
+                    FROM shadow_decisions
+                    WHERE resolved_at IS NOT NULL AND NOT data_gap
+                      AND twap60_open IS NOT NULL AND twap60_now IS NOT NULL
+                      AND market_open_timestamp IS NOT NULL
+                    ORDER BY market_open_timestamp ASC
+                """)
+                rows = cur.fetchall()
+        except Exception as e:
+            logger.error(f"Repricing deficit report error: {e}")
+            return {}
+
+        # Bordes de magnitud fijos de antemano (no derivados del dataset) —
+        # relativo al umbral mínimo ya desplegado (MIN_REL_DELTA_CHEAP).
+        MAG_BINS = [(0.0001, 0.0003), (0.0003, 0.0007), (0.0007, float("inf"))]
+
+        def mag_bin(rel_delta):
+            for lo, hi in MAG_BINS:
+                if lo <= rel_delta < hi:
+                    return f"{lo}-{hi}"
+            return None
+
+        # historia[(asset, mag_bin)] = lista de precios observados ANTES de
+        # la fila actual, en orden cronológico — se va llenando a medida que
+        # recorremos, así que cualquier "esperado" que se calcule para la
+        # fila N solo vio las filas 1..N-1.
+        history = {}
+        cases = []
+        skipped_insufficient_history = 0
+
+        for row in rows:
+            diff = row["twap60_now"] - row["twap60_open"]
+            if diff == 0 or not row["twap60_open"]:
+                continue
+            rel_delta = abs(diff / row["twap60_open"])
+            if rel_delta < min_rel_delta:
+                continue
+            side = "UP" if diff > 0 else "DOWN"
+            price = row["polymarket_up_price"] if side == "UP" else row["polymarket_down_price"]
+            if price is None or not (0 < price < price_max):
+                continue
+
+            mb = mag_bin(rel_delta)
+            if mb is None:
+                continue
+            key = (row["asset"], mb)
+            hist = history.setdefault(key, [])
+
+            if len(hist) >= min_history:
+                expected = sorted(hist)[len(hist) // 2]  # mediana de lo visto HASTA ahora
+                deficit = expected - price  # >0 = más barato de lo típico para este bucket
+                win = side == row["actual_outcome"]
+                pnl = stake * ((1 - price) / price) * (1 - fee) if win else -stake
+                cases.append({
+                    "asset": row["asset"], "mag_bin": mb, "price": round(price, 4),
+                    "expected": round(expected, 4), "deficit": round(deficit, 4),
+                    "win": win, "pnl": round(pnl, 2),
+                })
+            else:
+                skipped_insufficient_history += 1
+
+            hist.append(price)
+
+        if not cases:
+            return {"n_cases": 0, "skipped_insufficient_history": skipped_insufficient_history,
+                    "note": "sin casos con suficiente historia previa todavía"}
+
+        # Reportar por cuartil de déficit (calculado sobre los casos ya
+        # evaluados, solo para presentar el resultado — no alimenta ninguna
+        # decisión, así que no hay leakage en usarlo acá).
+        deficits = sorted(c["deficit"] for c in cases)
+        n = len(deficits)
+        quartile_edges = [deficits[int(n * q)] for q in (0.25, 0.5, 0.75)] if n >= 4 else []
+
+        def quartile_of(d):
+            if not quartile_edges:
+                return "todo"
+            if d < quartile_edges[0]:
+                return "Q1 (menor déficit)"
+            if d < quartile_edges[1]:
+                return "Q2"
+            if d < quartile_edges[2]:
+                return "Q3"
+            return "Q4 (mayor déficit)"
+
+        by_quartile = {}
+        for c in cases:
+            q = quartile_of(c["deficit"])
+            b = by_quartile.setdefault(q, {"n": 0, "wins": 0, "pnl": 0.0})
+            b["n"] += 1
+            b["pnl"] += c["pnl"]
+            if c["win"]:
+                b["wins"] += 1
+
+        report = []
+        for q in ("Q1 (menor déficit)", "Q2", "Q3", "Q4 (mayor déficit)", "todo"):
+            if q not in by_quartile:
+                continue
+            b = by_quartile[q]
+            report.append({
+                "quartil_deficit": q,
+                "n": b["n"],
+                "win_rate": round(b["wins"] / b["n"], 3),
+                "total_pnl": round(b["pnl"], 2),
+                "avg_pnl_per_trade": round(b["pnl"] / b["n"], 3),
+            })
+
+        by_asset_bin = {}
+        for c in cases:
+            k = f"{c['asset']}_{c['mag_bin']}"
+            by_asset_bin.setdefault(k, {"n": 0, "wins": 0})
+            by_asset_bin[k]["n"] += 1
+            if c["win"]:
+                by_asset_bin[k]["wins"] += 1
+
+        return {
+            "n_cases": n,
+            "skipped_insufficient_history": skipped_insufficient_history,
+            "by_deficit_quartile": report,
+            "by_asset_and_magnitude_bin": by_asset_bin,
+        }
 
     def get_cheap_extreme_confirmation_report(self, price_max=0.35, min_rel_delta=0.0001, stake=5.0, fee=0.07) -> dict:
         """22-ago-2026: get_cheap_band_detail() mostró que 0.05-0.15 le gana

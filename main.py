@@ -241,6 +241,13 @@ def _tick(scanner, feed, paper, live, shadow=None, chainlink=None, paper_v2=None
                 snap["pressure_integral"] = chainlink.get_pressure(asset, window_ts).get("integral")
                 signal_v2 = generate_signal_v2(snap, market)
 
+                if shadow:
+                    try:
+                        shadow.log_price_tick(market, snap.get("twap60_open"), snap.get("twap60_now"),
+                                               market.get("seconds_left"))
+                    except Exception as e:
+                        logger.debug(f"log_price_tick error [{asset}]: {e}")
+
                 if not signal_v2["blocked"]:
                     if paper_v2 and market_id not in paper_v2_open:
                         v2_asset_open = [p for p in paper_v2.open_positions.values() if p.get("asset") == asset]
