@@ -64,6 +64,9 @@ EARLY_PHASE_FLAT_SIZE = 2.0
 EARLY_PHASE_SINGLE_POSITION_TRADES = 5
 EARLY_PHASE_MAX_LOSS_USD = 10.0
 
+# Caché corta del balance real para no golpear la API en cada tick.
+BALANCE_CACHE_SEC = 10
+
 # Slippage del LIMIT order (ver order_executor.py) por banda — antes era un
 # 3% fijo para cualquier precio. En la banda favorita (precio ~0.75-0.97) el
 # margen esperado es de centavos por trade (~$0.19-0.21 en $5, ver
@@ -174,9 +177,26 @@ class LiveTraderV2:
         self.current_trading_day = None
         self.today_pnl = 0.0
         self._drawdown_paused = False
+        self._cached_balance = None
+        self._cached_balance_ts = 0.0
         self.conn = None
         self._init_client()
         self._connect_db()
+
+    def _get_cached_balance(self) -> float:
+        """Balance real de la cuenta, con caché corta (evita golpear la API
+        de balance en cada tick de cada mercado, ya que can_trade() y
+        _current_trade_size() ahora la consultan directamente en vez de usar
+        la suma interna today_pnl — ver can_trade() para el porqué."""
+        now = time.time()
+        with self._lock:
+            if self._cached_balance is not None and (now - self._cached_balance_ts) < BALANCE_CACHE_SEC:
+                return self._cached_balance
+        balance = self.get_balance()
+        with self._lock:
+            self._cached_balance = balance
+            self._cached_balance_ts = now
+        return balance
 
     def _init_client(self):
         try:
@@ -292,31 +312,57 @@ class LiveTraderV2:
             if len(self.open_positions) >= max_open:
                 return False
 
-            if self.day_start_balance and self.day_start_balance > 0:
-                if self.total_trades < EARLY_PHASE_FLAT_TRADES:
-                    if self.today_pnl <= -EARLY_PHASE_MAX_LOSS_USD:
-                        if not self._drawdown_paused:
-                            self._drawdown_paused = True
-                            self._save_day_state()
-                            logger.warning(
-                                f"LiveTraderV2 EARLY-PHASE loss limit hit: ${self.today_pnl:.2f} "
-                                f"<= -${EARLY_PHASE_MAX_LOSS_USD:.2f} (trade #{self.total_trades}, "
-                                f"fase temprana de ejecución) — pausando el resto del día para "
-                                f"revisión manual."
-                            )
-                        return False
-                else:
-                    drawdown = -self.today_pnl / self.day_start_balance
-                    if drawdown >= DRAWDOWN_LIMIT:
-                        if not self._drawdown_paused:
-                            self._drawdown_paused = True
-                            self._save_day_state()
-                            logger.warning(
-                                f"LiveTraderV2 drawdown limit hit: -{drawdown*100:.1f}% of today's "
-                                f"start balance (${self.day_start_balance:.2f}) — pausing until tomorrow"
-                            )
-                        return False
-            return True
+            day_start = self.day_start_balance
+            total_trades = self.total_trades
+            was_paused = self._drawdown_paused
+
+        if not day_start or day_start <= 0:
+            return True  # todavía sin balance de referencia del día, no se puede evaluar
+
+        # El freno de drawdown se ancla al BALANCE REAL de la cuenta (con
+        # caché corta), no a una suma que construimos nosotros mismos
+        # (today_pnl) — encontrado 22-ago-2026: dos operaciones de banda
+        # barata a precio muy bajo (~0.05-0.07) se llenaron fragmentadas
+        # contra liquidez delgada, tardaron en confirmarse, y terminaron en
+        # UNKNOWN_FILL (cancelación ambigua) — pero en realidad SÍ se
+        # habían llenado y GANARON en grande (+$94.90 y +$66.42 reales). El
+        # supuesto de "peor caso" que le agregamos a UNKNOWN_FILL asumió
+        # pérdida total para esas dos, y con varios UNKNOWN_FILL más en el
+        # día el today_pnl interno quedó en un -29.9% completamente falso
+        # — pausando el trading real mientras la cuenta real iba +$164 en
+        # el día. El balance real es la fuente de verdad; es inmune a
+        # cualquier error de contabilidad interna como este.
+        real_balance = self._get_cached_balance()
+        if not real_balance or real_balance <= 0:
+            logger.error("LiveTraderV2: no pude obtener balance real para el freno de drawdown — bloqueando por seguridad")
+            return False
+
+        if total_trades < EARLY_PHASE_FLAT_TRADES:
+            loss_usd = day_start - real_balance
+            paused = loss_usd >= EARLY_PHASE_MAX_LOSS_USD
+            reason = (
+                f"EARLY-PHASE loss limit hit: balance real ${real_balance:.2f}, "
+                f"day_start ${day_start:.2f} (-${loss_usd:.2f}) >= -${EARLY_PHASE_MAX_LOSS_USD:.2f} "
+                f"(trade #{total_trades}, fase temprana de ejecución)"
+            )
+        else:
+            drawdown = 1 - (real_balance / day_start)
+            paused = drawdown >= DRAWDOWN_LIMIT
+            reason = (
+                f"drawdown limit hit: balance real ${real_balance:.2f} vs day_start "
+                f"${day_start:.2f} ({-drawdown*100:.1f}%)"
+            )
+
+        with self._lock:
+            self._drawdown_paused = paused
+        if paused and not was_paused:
+            logger.warning(f"LiveTraderV2 {reason} — pausando hasta que el balance real se recupere.")
+            self._save_day_state()
+        elif was_paused and not paused:
+            logger.info(f"LiveTraderV2: balance real (${real_balance:.2f}) ya no está en drawdown vs day_start (${day_start:.2f}) — reanudando.")
+            self._save_day_state()
+
+        return not paused
 
     def record_blocked(self):
         with self._lock:
@@ -325,9 +371,12 @@ class LiveTraderV2:
     def _current_trade_size(self) -> float:
         with self._lock:
             total = self.total_trades
-            balance = (self.day_start_balance or 0) + self.today_pnl
         if total < EARLY_PHASE_FLAT_TRADES:
             return EARLY_PHASE_FLAT_SIZE
+        # Balance real (misma caché que can_trade()), no day_start+today_pnl
+        # — mismo motivo que el freno de drawdown: today_pnl puede quedar
+        # mal si un fill queda UNKNOWN_FILL y en realidad sí se ejecutó.
+        balance = self._get_cached_balance()
         if balance <= 0:
             return MIN_TRADE_USD
         size = balance * TARGET_RISK_PCT
@@ -414,13 +463,18 @@ class LiveTraderV2:
                             "size": intended_size,
                             "time": datetime.now(timezone.utc).strftime("%H:%M UTC"),
                         })
-                        # Se asume el PEOR caso para el circuit breaker de HOY: que
-                        # la orden sí se llenó y se perdió por completo. Antes esto
-                        # no tocaba today_pnl, así que si de verdad se había llenado
-                        # y perdido, el drawdown del día quedaba ciego a esa pérdida
-                        # hasta el balance real del día siguiente — encontrado en
-                        # revisión (20-ago-2026). Conservador a propósito: en el peor
-                        # caso pausamos de más un día que sí iba bien; nunca al revés.
+                        # Solo informativo (today_pnl/get_stats) desde el 22-ago-2026
+                        # — el freno de drawdown (can_trade) ya NO usa today_pnl,
+                        # usa el balance real de la cuenta (ver can_trade()). Se
+                        # había agregado el 20-ago-2026 asumiendo peor caso (pérdida
+                        # total) para que el circuit breaker no quedara ciego a un
+                        # fill que sí se ejecutó y perdió; pero resultó tener el
+                        # problema simétrico: el 22-ago dos UNKNOWN_FILL de banda
+                        # barata en realidad habían GANADO en grande (+$94.90 y
+                        # +$66.42), y este supuesto generó un today_pnl falso de
+                        # -29.9% que pausó el trading real mientras la cuenta real
+                        # iba +$164 en el día. Se deja para mostrar en el dashboard
+                        # como señal de "esto quedó incierto", ya no decide nada.
                         self.today_pnl -= intended_size
                     self._save_day_state()
                     return
