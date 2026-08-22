@@ -1605,6 +1605,92 @@ class ShadowLogger:
                 })
         return report
 
+    def get_cheap_extreme_confirmation_report(self, price_max=0.35, min_rel_delta=0.0001, stake=5.0, fee=0.07) -> dict:
+        """22-ago-2026: get_cheap_band_detail() mostró que 0.05-0.15 le gana
+        al breakeven por mucho margen (35% real vs 11% necesario, n=20) —
+        pero eso solo dice CUÁNTO, no POR QUÉ. Hipótesis: a un precio así de
+        barato para nuestro lado, el order book de Polymarket todavía
+        refleja el precio de ANTES del movimiento fuerte de TWAP60 que nos
+        hizo entrar (el filtro de magnitud exige eso) — está "atrasado"
+        frente a una señal más fresca. Si es así, las señales de
+        confirmación (D_lead/OFI/presión, ya construidas para la zona
+        media) deberían separar mejor los aciertos de los fallos TAMBIÉN
+        acá, igual que ya se vio en las bandas ya tradeadas. Restringe el
+        análisis a precio < price_max (la zona de pago explosivo) en vez de
+        toda la banda barata, para no diluir la señal con la parte de la
+        banda que ya es casi una moneda cargada (0.45-0.55, 82.8% acierto)."""
+        if not self.conn:
+            return {}
+        try:
+            with self.conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute("""
+                    SELECT actual_outcome, polymarket_up_price, polymarket_down_price,
+                           twap60_open, twap60_now, chainlink_spot_now,
+                           ofi_15s, twap_pressure_integral
+                    FROM shadow_decisions
+                    WHERE resolved_at IS NOT NULL AND NOT data_gap
+                      AND twap60_open IS NOT NULL AND twap60_now IS NOT NULL
+                """)
+                rows = cur.fetchall()
+        except Exception as e:
+            logger.error(f"Cheap extreme confirmation report error: {e}")
+            return {}
+
+        by_count = {c: {"n": 0, "wins": 0, "pnl": 0.0} for c in range(4)}
+        detail = []
+        for row in rows:
+            diff = row["twap60_now"] - row["twap60_open"]
+            if diff == 0 or not row["twap60_open"]:
+                continue
+            rel_delta = abs(diff / row["twap60_open"])
+            if rel_delta < min_rel_delta:
+                continue
+            side = "UP" if diff > 0 else "DOWN"
+            price = row["polymarket_up_price"] if side == "UP" else row["polymarket_down_price"]
+            if price is None or not (0 < price < price_max):
+                continue
+
+            count = 0
+            parts = []
+            if row["chainlink_spot_now"] is not None:
+                lead_diff = row["chainlink_spot_now"] - row["twap60_now"]
+                if lead_diff != 0:
+                    agree = ("UP" if lead_diff > 0 else "DOWN") == side
+                    count += 1 if agree else 0
+                    parts.append("lead" + ("✓" if agree else "✗"))
+            if row["ofi_15s"] is not None and row["ofi_15s"] != 0:
+                agree = ("UP" if row["ofi_15s"] > 0 else "DOWN") == side
+                count += 1 if agree else 0
+                parts.append("ofi" + ("✓" if agree else "✗"))
+            if row["twap_pressure_integral"] is not None and row["twap_pressure_integral"] != 0:
+                agree = ("UP" if row["twap_pressure_integral"] > 0 else "DOWN") == side
+                count += 1 if agree else 0
+                parts.append("pressure" + ("✓" if agree else "✗"))
+
+            win = side == row["actual_outcome"]
+            pnl = stake * ((1 - price) / price) * (1 - fee) if win else -stake
+            b = by_count[count]
+            b["n"] += 1
+            b["pnl"] += pnl
+            if win:
+                b["wins"] += 1
+            detail.append({"price": round(price, 3), "confirmations": count, "win": win,
+                           "pnl": round(pnl, 2), "detail": " ".join(parts)})
+
+        report = []
+        for count in range(4):
+            b = by_count[count]
+            if b["n"] == 0:
+                continue
+            report.append({
+                "confirmations": count,
+                "n": b["n"],
+                "win_rate": round(b["wins"] / b["n"], 3),
+                "total_pnl": round(b["pnl"], 2),
+                "avg_pnl_per_trade": round(b["pnl"] / b["n"], 3),
+            })
+        return {"price_max": price_max, "by_confirmation": report, "n_total": len(detail), "trades": detail}
+
     def simulate_confirmation_weighted_sizing(self, base_stake=5.0, fee=0.07) -> dict:
         """get_confirmation_report() ya mostró que más confirmaciones (0-3)
         predicen mejor calidad DENTRO de las bandas que v2 ya tradea (66.8%

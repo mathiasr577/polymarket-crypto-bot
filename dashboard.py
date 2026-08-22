@@ -586,6 +586,16 @@ def create_dashboard(get_stats_fn, get_prices_fn, get_markets_fn=None, mode="PAP
     def api_shadow_sizing():
         return jsonify(get_shadow_sizing_fn() if get_shadow_sizing_fn else {})
 
+    @app.route("/api/shadow-cheap-extreme-confirmation")
+    def api_shadow_cheap_extreme_confirmation():
+        """Ver ShadowLogger.get_cheap_extreme_confirmation_report() — busca
+        el POR QUÉ detrás de la sub-banda 0.05-0.15, no solo el cuánto."""
+        try:
+            from shadow_logger import get_shadow_logger
+            return jsonify(get_shadow_logger().get_cheap_extreme_confirmation_report())
+        except Exception as e:
+            return jsonify({"error": str(e)})
+
     @app.route("/api/shadow-cheap-detail")
     def api_shadow_cheap_detail():
         """Igual que /api/shadow-favorite-detail pero para la banda barata —
