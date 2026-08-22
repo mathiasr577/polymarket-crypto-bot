@@ -586,6 +586,16 @@ def create_dashboard(get_stats_fn, get_prices_fn, get_markets_fn=None, mode="PAP
     def api_shadow_sizing():
         return jsonify(get_shadow_sizing_fn() if get_shadow_sizing_fn else {})
 
+    @app.route("/api/shadow-cheap-detail")
+    def api_shadow_cheap_detail():
+        """Igual que /api/shadow-favorite-detail pero para la banda barata —
+        ver ShadowLogger.get_cheap_band_detail()."""
+        try:
+            from shadow_logger import get_shadow_logger
+            return jsonify(get_shadow_logger().get_cheap_band_detail())
+        except Exception as e:
+            return jsonify({"error": str(e)})
+
     @app.route("/api/paper-v2-today")
     def api_paper_v2_today():
         """Desglose de paper v2 (mismas señales que live, sin riesgo real)

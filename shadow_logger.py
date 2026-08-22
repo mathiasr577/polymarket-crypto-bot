@@ -1006,6 +1006,73 @@ class ShadowLogger:
             "magnitude_q4_and_agreement": run(min_rel_delta=0.00023, require_agreement=True),
         }
 
+    def get_cheap_band_detail(self, min_rel_delta=0.0001, stake=5.0, fee=0.07) -> dict:
+        """Misma idea que get_favorite_band_detail pero para la banda barata
+        (22-ago-2026): dos operaciones a precio muy extremo (~0.05-0.07)
+        pagaron enorme en un solo día real y generaron ganas de "apuntar
+        más a eso". Antes de tocar nada, hay que separar dos cosas que se
+        confunden fácil: pagar más cuando gana (aritmética pura de precio
+        bajo) vs. acertar MÁS seguido en precios extremos (una ventaja real
+        que justificaría tradear distinto ahí). Aplica el mismo filtro de
+        magnitud ya desplegado (MIN_REL_DELTA_CHEAP) para reflejar lo que
+        realmente se tradea, no el crudo sin filtrar."""
+        if not self.conn:
+            return {}
+        try:
+            with self.conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute("""
+                    SELECT actual_outcome, polymarket_up_price, polymarket_down_price,
+                           twap60_open, twap60_now
+                    FROM shadow_decisions
+                    WHERE resolved_at IS NOT NULL AND NOT data_gap
+                      AND twap60_open IS NOT NULL AND twap60_now IS NOT NULL
+                """)
+                rows = cur.fetchall()
+        except Exception as e:
+            logger.error(f"Cheap band detail error: {e}")
+            return {}
+
+        def breakeven(price):
+            return price / (price + (1 - fee) * (1 - price))
+
+        sub_bands = [(0.00, 0.05), (0.05, 0.15), (0.15, 0.25), (0.25, 0.35), (0.35, 0.45), (0.45, 0.55)]
+        report = []
+        for lo, hi in sub_bands:
+            n = wins = 0
+            pnl = 0.0
+            for row in rows:
+                diff = row["twap60_now"] - row["twap60_open"]
+                if diff == 0 or not row["twap60_open"]:
+                    continue
+                rel_delta = abs(diff / row["twap60_open"])
+                if rel_delta < min_rel_delta:
+                    continue
+                side = "UP" if diff > 0 else "DOWN"
+                price = row["polymarket_up_price"] if side == "UP" else row["polymarket_down_price"]
+                if price is None or not (lo <= price < hi):
+                    continue
+                win = side == row["actual_outcome"]
+                pnl += stake * ((1 - price) / price) * (1 - fee) if win else -stake
+                n += 1
+                if win:
+                    wins += 1
+            if n == 0:
+                continue
+            mid = (lo + hi) / 2
+            wr = wins / n
+            report.append({
+                "band": f"{lo:.2f}-{hi:.2f}",
+                "breakeven_at_midpoint": round(breakeven(mid), 4),
+                "n": n,
+                "win_rate": round(wr, 3),
+                "beats_breakeven": wr > breakeven(mid),
+                "total_pnl": round(pnl, 2),
+                "avg_pnl_per_trade": round(pnl / n, 4),
+                "risk_per_trade": stake,
+                "max_reward_per_trade_approx": round(stake * (1 - mid) / mid * (1 - fee), 4),
+            })
+        return {"sub_bands": report}
+
     def get_favorite_band_detail(self, stake=5.0, fee=0.07) -> dict:
         """El usuario marcó algo importante: tratar 0.85-1.00 como una sola
         banda esconde que el breakeven sube MUY rápido adentro de ese rango
