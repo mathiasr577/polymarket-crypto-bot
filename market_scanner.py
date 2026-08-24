@@ -3,12 +3,39 @@ import logging
 import time
 import json
 import threading
+import psycopg2
 from collections import deque
 from datetime import datetime, timezone
-from config import GAMMA_API, SCAN_INTERVAL
+from config import GAMMA_API, SCAN_INTERVAL, DATABASE_URL
 from signal_engine import ENTRY_WINDOW_START
 
 logger = logging.getLogger(__name__)
+
+# 23-ago-2026: hoy solo se tradea en vivo 9AM-6PM ET — ¿y si esa ventana no
+# es la de mejor liquidez? Paper trading ya corre 24/7 (no lo limita
+# trading_hours), pero paper asume que siempre te llenás al precio que ves
+# — no dice nada sobre si hay alguien real del otro lado en cada horario.
+# Esto guarda, cada vez que se piden precios REALES del CLOB (no el
+# fallback de Gamma, que puede estar stale — ver used_real_clob_prices en
+# _fetch), una foto liviana de up_price+down_price. Con dos semanas de esto
+# corriendo 24/7 se puede ver por hora UTC y día de semana: qué tan cerca
+# de $1.00 suma el par (spread/eficiencia) y qué tan dispersa es esa suma
+# (mercado más o menos activo) — sin arriesgar nada real. Throttle de 20s
+# por asset para no inflar la tabla (el scan cerca del cierre es cada 2s).
+LIQUIDITY_LOG_THROTTLE_SEC = 20
+
+LIQUIDITY_DDL = """
+CREATE TABLE IF NOT EXISTS market_liquidity_ticks (
+    id SERIAL PRIMARY KEY,
+    asset TEXT,
+    window_ts BIGINT,
+    ts TIMESTAMPTZ DEFAULT NOW(),
+    seconds_remaining FLOAT,
+    up_price FLOAT,
+    down_price FLOAT
+);
+CREATE INDEX IF NOT EXISTS idx_market_liquidity_ticks_ts ON market_liquidity_ticks (ts);
+"""
 
 # Chequeo pasivo de arbitraje sin dirección: si UP+DOWN < ARB_GAP_THRESHOLD
 # (precios reales de compra del CLOB, no el midpoint), comprando ambos lados
@@ -40,6 +67,41 @@ class MarketScanner:
         self.arb_checked_count = 0
         self.arb_gap_count = 0
         self.arb_gap_samples = deque(maxlen=50)
+        self._liquidity_conn = None
+        self._last_liquidity_log = {}  # asset -> last logged timestamp (time.time())
+        self._connect_liquidity_db()
+
+    def _connect_liquidity_db(self):
+        if not DATABASE_URL:
+            return
+        try:
+            self._liquidity_conn = psycopg2.connect(DATABASE_URL)
+            self._liquidity_conn.autocommit = True
+            with self._liquidity_conn.cursor() as cur:
+                cur.execute(LIQUIDITY_DDL)
+        except Exception as e:
+            logger.error(f"MarketScanner liquidity DB error: {e}")
+            self._liquidity_conn = None
+
+    def _log_liquidity_tick(self, asset, window_ts, seconds_left, up_price, down_price):
+        """Best-effort, nunca debe afectar el scan — ver comentario arriba
+        de LIQUIDITY_LOG_THROTTLE_SEC."""
+        if not self._liquidity_conn:
+            return
+        now = time.time()
+        last = self._last_liquidity_log.get(asset, 0)
+        if now - last < LIQUIDITY_LOG_THROTTLE_SEC:
+            return
+        self._last_liquidity_log[asset] = now
+        try:
+            with self._liquidity_conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO market_liquidity_ticks
+                    (asset, window_ts, seconds_remaining, up_price, down_price)
+                    VALUES (%s,%s,%s,%s,%s)
+                """, (asset, window_ts, seconds_left, up_price, down_price))
+        except Exception as e:
+            logger.debug(f"log_liquidity_tick error [{asset}]: {e}")
 
     def start(self):
         self._running = True
@@ -193,6 +255,11 @@ class MarketScanner:
 
             if used_real_clob_prices:
                 self._check_arb_gap(asset, slug, up_price, down_price, seconds_left)
+                try:
+                    window_ts = int(slug.rsplit("-", 1)[-1])
+                except (ValueError, IndexError):
+                    window_ts = None
+                self._log_liquidity_tick(asset, window_ts, seconds_left, up_price, down_price)
 
             ref_price = self._get_ref_price(m, event, asset)
 

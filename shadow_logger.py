@@ -26,6 +26,7 @@ import logging
 import threading
 import time
 import json
+import statistics
 import requests
 import psycopg2
 import psycopg2.extras
@@ -1058,6 +1059,61 @@ class ShadowLogger:
             "magnitude_only_strict_0.0005": run(min_rel_delta=0.0005, require_agreement=False),
             "agreement_only": run(min_rel_delta=0, require_agreement=True),
             "magnitude_q4_and_agreement": run(min_rel_delta=0.00023, require_agreement=True),
+        }
+
+    def get_liquidity_by_hour_report(self) -> dict:
+        """Lee market_liquidity_ticks (ver market_scanner.py, corre 24/7,
+        solo con precio REAL de compra del CLOB — no el fallback de Gamma
+        que puede estar viejo). up_price+down_price es un proxy de spread:
+        más cerca de un valor bajo y estable = mercado más activo/líquido;
+        sumas más altas o más dispersas por hora sugieren menos gente
+        cotizando en ese momento. Pregunta que responde: ¿el horario actual
+        de trading real (9AM-6PM ET = 13-22 UTC) es realmente el de mejor
+        liquidez, o hay horas afuera de ese rango tan buenas o mejores?"""
+        if not self.conn:
+            return {}
+        try:
+            with self.conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute("""
+                    SELECT up_price, down_price,
+                           EXTRACT(HOUR FROM ts) AS hour_utc,
+                           EXTRACT(DOW FROM ts) AS dow
+                    FROM market_liquidity_ticks
+                    WHERE up_price IS NOT NULL AND down_price IS NOT NULL
+                """)
+                rows = cur.fetchall()
+        except Exception as e:
+            logger.error(f"Liquidity by hour report error: {e}")
+            return {}
+
+        if not rows:
+            return {"n_ticks": 0, "note": "sin datos todavía — instrumentado 23-ago-2026, tarda en acumular"}
+
+        by_hour, by_dow = {}, {}
+        for row in rows:
+            s = row["up_price"] + row["down_price"]
+            by_hour.setdefault(int(row["hour_utc"]), []).append(s)
+            by_dow.setdefault(int(row["dow"]), []).append(s)
+
+        def summarize(d, label_fn=None):
+            out = []
+            for k in sorted(d.keys()):
+                vals = d[k]
+                out.append({
+                    "key": label_fn(k) if label_fn else k,
+                    "n": len(vals),
+                    "avg_sum_up_down": round(statistics.mean(vals), 4),
+                    "stdev_sum_up_down": round(statistics.stdev(vals), 4) if len(vals) > 1 else None,
+                })
+            return out
+
+        dow_names = ["domingo", "lunes", "martes", "miércoles", "jueves", "viernes", "sábado"]
+        return {
+            "n_ticks": len(rows),
+            "by_hour_utc": summarize(by_hour),
+            "by_day_of_week": summarize(by_dow, lambda k: dow_names[k]),
+            "current_live_trading_hours_utc": "13-22 (9AM-6PM ET)",
+            "note": "avg_sum_up_down más bajo y estable = mercado más activo; más alto o disperso = menos gente cotizando",
         }
 
     def get_band_recency_report(self, days_recent=3, min_rel_delta=0.0001, stake=5.0, fee=0.07) -> dict:
