@@ -283,6 +283,7 @@ def _tick(scanner, feed, paper, live, shadow=None, chainlink=None, paper_v2=None
                                 band=signal_v2["band"],
                                 reasons=signal_v2["reasons"],
                                 tokens=market["tokens"],
+                                stake_multiplier=signal_v2.get("stake_multiplier", 1.0),
                             )
             except Exception as e:
                 logger.debug(f"Signal v2 error [{asset}]: {e}")

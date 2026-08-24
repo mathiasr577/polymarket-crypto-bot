@@ -44,6 +44,13 @@ MAX_NO_FILLS_HISTORY = 20
 TARGET_RISK_PCT = 0.08
 MIN_TRADE_USD = 2.0
 
+# Techo absoluto para el sizing por confirmaciones (24-ago-2026) — ver
+# _current_trade_size(). Independiente de TRADE_SIZE (el techo base sin
+# multiplicador, $5) — este es el techo de lo que se puede llegar a
+# arriesgar en UN trade con el multiplicador aplicado, decisión explícita
+# del usuario, no calculado.
+LIVE_MAX_STAKE_USD = 10.0
+
 # Fase temprana de plata real (20-ago-2026, revisión pre-lanzamiento con la
 # otra IA): el primer día no valida el modelo — valida que la EJECUCIÓN real
 # (fills, fees, slippage, latencia) se comporte como el backtest/paper
@@ -368,10 +375,13 @@ class LiveTraderV2:
         with self._lock:
             self.blocked_count += 1
 
-    def _current_trade_size(self) -> float:
+    def _current_trade_size(self, stake_multiplier: float = 1.0) -> float:
         with self._lock:
             total = self.total_trades
         if total < EARLY_PHASE_FLAT_TRADES:
+            # Fase temprana ignora el multiplicador a propósito — su punto
+            # era aislar la ejecución del sizing, y ya quedó atrás (más de
+            # EARLY_PHASE_FLAT_TRADES fills reales hechos).
             return EARLY_PHASE_FLAT_SIZE
         # Balance real (misma caché que can_trade()), no day_start+today_pnl
         # — mismo motivo que el freno de drawdown: today_pnl puede quedar
@@ -380,7 +390,15 @@ class LiveTraderV2:
         if balance <= 0:
             return MIN_TRADE_USD
         size = balance * TARGET_RISK_PCT
-        return round(min(TRADE_SIZE, max(MIN_TRADE_USD, size)), 2)
+        base = min(TRADE_SIZE, max(MIN_TRADE_USD, size))
+        # Sizing por confirmaciones (24-ago-2026) — el mismo multiplicador
+        # que ya se validó varios días en paper (STAKE_MULTIPLIER_PER_
+        # CONFIRMATION en signal_engine_v2.py, 1.0x-2.5x según cuántas de
+        # las 3 señales de confirmación coinciden). Acá, con plata real, se
+        # le pone un techo absoluto propio (LIVE_MAX_STAKE_USD) en vez de
+        # dejar que el multiplicador decida solo — 2.5x sobre el techo base
+        # de $5 daría $12.50, más de lo que se quiere arriesgar por trade.
+        return round(min(LIVE_MAX_STAKE_USD, max(MIN_TRADE_USD, base * stake_multiplier)), 2)
 
     def get_balance(self) -> float:
         try:
@@ -391,10 +409,11 @@ class LiveTraderV2:
             return 0.0
 
     def open_trade(self, market_id, title, asset, side, price, token_id,
-                   band, reasons, tokens=None) -> bool:
+                   band, reasons, tokens=None, stake_multiplier=1.0) -> bool:
         """Misma reserva-síncrona-más-ejecución-en-hilo-aparte que v1 — ver
         live_trader.py para el porqué (no bloquear el tick mientras se
-        espera hasta 55s por un fill)."""
+        espera hasta 55s por un fill). stake_multiplier: ver
+        _current_trade_size() y LIVE_MAX_STAKE_USD."""
         with self._lock:
             if self.total_trades >= MAX_LIVE_TRADES:
                 return False
@@ -410,7 +429,7 @@ class LiveTraderV2:
             self.attempted_markets.add(market_id)
             self.active_assets.add(asset)
 
-        intended_size = self._current_trade_size()
+        intended_size = self._current_trade_size(stake_multiplier)
 
         t = threading.Thread(
             target=self._execute_order,
