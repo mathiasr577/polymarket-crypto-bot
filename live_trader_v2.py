@@ -680,6 +680,7 @@ class LiveTraderV2:
                 "balance": cash_balance,
                 "today_pnl": self.today_pnl,
                 "day_start_balance": self.day_start_balance,
+                "current_trading_day": str(self.current_trading_day),
                 "drawdown_paused": self._drawdown_paused,
                 "early_phase": {
                     "flat_sizing_active": self.total_trades < EARLY_PHASE_FLAT_TRADES,
