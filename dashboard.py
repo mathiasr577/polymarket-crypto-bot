@@ -586,6 +586,16 @@ def create_dashboard(get_stats_fn, get_prices_fn, get_markets_fn=None, mode="PAP
     def api_shadow_sizing():
         return jsonify(get_shadow_sizing_fn() if get_shadow_sizing_fn else {})
 
+    @app.route("/api/shadow-band-recency")
+    def api_shadow_band_recency():
+        """Ver ShadowLogger.get_band_recency_report() — últimos N días vs.
+        histórico previo, banda barata y favorita."""
+        try:
+            from shadow_logger import get_shadow_logger
+            return jsonify(get_shadow_logger().get_band_recency_report())
+        except Exception as e:
+            return jsonify({"error": str(e)})
+
     @app.route("/api/shadow-repricing-deficit")
     def api_shadow_repricing_deficit():
         """Ver ShadowLogger.get_repricing_deficit_report() — parte estática

@@ -29,7 +29,7 @@ import json
 import requests
 import psycopg2
 import psycopg2.extras
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 from config import DATABASE_URL, GAMMA_API
 
@@ -1059,6 +1059,72 @@ class ShadowLogger:
             "agreement_only": run(min_rel_delta=0, require_agreement=True),
             "magnitude_q4_and_agreement": run(min_rel_delta=0.00023, require_agreement=True),
         }
+
+    def get_band_recency_report(self, days_recent=3, min_rel_delta=0.0001, stake=5.0, fee=0.07) -> dict:
+        """23-ago-2026: tres días seguidos (21, 22 sin los dos golpes de
+        suerte, 23) la banda barata rindió mal en lo REALMENTE tradeado —
+        ¿es una racha de muestra chica (esperable, ya la vimos antes) o un
+        cambio real reciente en la banda? Compara, con TODO el universo de
+        decisiones evaluadas por shadow-logging (no solo las que se
+        tradearon — muestra mucho más grande, menos sesgo de selección por
+        límites de concurrencia), los últimos `days_recent` días contra
+        todo lo anterior, para banda barata Y favorita (esta última
+        preocupa hoy: 85.1% de acierto pero PnL negativo)."""
+        if not self.conn:
+            return {}
+        try:
+            with self.conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute("""
+                    SELECT actual_outcome, polymarket_up_price, polymarket_down_price,
+                           twap60_open, twap60_now, market_open_timestamp
+                    FROM shadow_decisions
+                    WHERE resolved_at IS NOT NULL AND NOT data_gap
+                      AND twap60_open IS NOT NULL AND twap60_now IS NOT NULL
+                      AND market_open_timestamp IS NOT NULL
+                """)
+                rows = cur.fetchall()
+        except Exception as e:
+            logger.error(f"Band recency report error: {e}")
+            return {}
+
+        now = datetime.now(timezone.utc)
+        cutoff = now - timedelta(days=days_recent)
+
+        bands = {"cheap": (0.0, 0.55), "favorite": (0.75, 0.97)}
+        result = {}
+        for band_name, (lo, hi) in bands.items():
+            buckets = {"recent": {"n": 0, "wins": 0, "pnl": 0.0}, "historical": {"n": 0, "wins": 0, "pnl": 0.0}}
+            for row in rows:
+                diff = row["twap60_now"] - row["twap60_open"]
+                if diff == 0 or not row["twap60_open"]:
+                    continue
+                if band_name == "cheap":
+                    rel_delta = abs(diff / row["twap60_open"])
+                    if rel_delta < min_rel_delta:
+                        continue
+                side = "UP" if diff > 0 else "DOWN"
+                price = row["polymarket_up_price"] if side == "UP" else row["polymarket_down_price"]
+                if price is None or not (lo <= price < hi):
+                    continue
+                win = side == row["actual_outcome"]
+                pnl = stake * ((1 - price) / price) * (1 - fee) if win else -stake
+                bucket = "recent" if row["market_open_timestamp"] >= cutoff else "historical"
+                b = buckets[bucket]
+                b["n"] += 1
+                b["pnl"] += pnl
+                if win:
+                    b["wins"] += 1
+
+            result[band_name] = {
+                k: {
+                    "n": b["n"],
+                    "win_rate": round(b["wins"] / b["n"], 3) if b["n"] else None,
+                    "total_pnl": round(b["pnl"], 2),
+                    "avg_pnl_per_trade": round(b["pnl"] / b["n"], 3) if b["n"] else None,
+                }
+                for k, b in buckets.items()
+            }
+        return {"days_recent": days_recent, "cutoff_utc": cutoff.isoformat(), "by_band": result}
 
     def get_cheap_band_detail(self, min_rel_delta=0.0001, stake=5.0, fee=0.07) -> dict:
         """Misma idea que get_favorite_band_detail pero para la banda barata
