@@ -1061,6 +1061,89 @@ class ShadowLogger:
             "magnitude_q4_and_agreement": run(min_rel_delta=0.00023, require_agreement=True),
         }
 
+    def get_convergence_report(self, min_ticks=3) -> dict:
+        """Primera lectura de shadow_price_ticks (instrumentado 22-ago-2026
+        para la hipótesis de "el CLOB está atrasado respecto al TWAP"). Para
+        cada mercado con varias fotos guardadas, mira cómo se movió el
+        precio de NUESTRO lado entre la primera y la última foto — si se
+        movió hacia $1.00 (más caro = el mercado se está convenciendo de
+        nuestra dirección), eso es "convergencia". La pregunta central de
+        la otra IA: ¿los que terminan ganando muestran más convergencia que
+        los que terminan perdiendo?
+
+        Esto es puramente retrospectivo/descriptivo (usa la trayectoria
+        COMPLETA hasta la resolución) — sirve para descubrir el patrón, NO
+        es todavía una señal operable en vivo (esa solo podría usar la
+        velocidad de cierre ANTES del instante de entrada, nunca saber que
+        va a converger después — ver conversación)."""
+        if not self.conn:
+            return {}
+        try:
+            with self.conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute("""
+                    SELECT market_id, ts, side, price
+                    FROM shadow_price_ticks
+                    ORDER BY market_id, ts ASC
+                """)
+                ticks = cur.fetchall()
+                cur.execute("""
+                    SELECT market_id, actual_outcome FROM shadow_decisions
+                    WHERE resolved_at IS NOT NULL AND actual_outcome IS NOT NULL
+                """)
+                outcomes = {r["market_id"]: r["actual_outcome"] for r in cur.fetchall()}
+        except Exception as e:
+            logger.error(f"Convergence report error: {e}")
+            return {}
+
+        if not ticks:
+            return {"n_ticks_total": 0, "note": "sin datos todavía"}
+
+        by_market = {}
+        for t in ticks:
+            by_market.setdefault(t["market_id"], []).append(t)
+
+        cohort_win, cohort_loss = [], []
+        n_too_few = n_side_flip = n_no_outcome = 0
+
+        for market_id, rows in by_market.items():
+            if len(rows) < min_ticks:
+                n_too_few += 1
+                continue
+            outcome = outcomes.get(market_id)
+            if outcome is None:
+                n_no_outcome += 1
+                continue
+            side = rows[0]["side"]
+            if any(r["side"] != side for r in rows):
+                n_side_flip += 1  # TWAP cambió de dirección a mitad de ventana — caso ambiguo, se descarta
+                continue
+            delta = rows[-1]["price"] - rows[0]["price"]
+            win = side == outcome
+            entry = {"market_id": market_id, "n_ticks": len(rows),
+                      "first_price": round(rows[0]["price"], 4), "last_price": round(rows[-1]["price"], 4),
+                      "delta": round(delta, 4), "win": win}
+            (cohort_win if win else cohort_loss).append(entry)
+
+        def summarize(cohort):
+            if not cohort:
+                return {"n": 0}
+            deltas = [c["delta"] for c in cohort]
+            return {
+                "n": len(cohort),
+                "avg_delta": round(statistics.mean(deltas), 4),
+                "pct_converging_toward_us": round(sum(1 for d in deltas if d > 0) / len(deltas), 3),
+            }
+
+        return {
+            "n_ticks_total": len(ticks),
+            "n_markets_with_ticks": len(by_market),
+            "winners": summarize(cohort_win),
+            "losers": summarize(cohort_loss),
+            "markets_too_few_ticks": n_too_few,
+            "markets_side_flipped_excluded": n_side_flip,
+            "markets_no_outcome_yet": n_no_outcome,
+        }
+
     def get_liquidity_by_hour_report(self) -> dict:
         """Lee market_liquidity_ticks (ver market_scanner.py, corre 24/7,
         solo con precio REAL de compra del CLOB — no el fallback de Gamma

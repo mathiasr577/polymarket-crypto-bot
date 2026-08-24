@@ -586,6 +586,16 @@ def create_dashboard(get_stats_fn, get_prices_fn, get_markets_fn=None, mode="PAP
     def api_shadow_sizing():
         return jsonify(get_shadow_sizing_fn() if get_shadow_sizing_fn else {})
 
+    @app.route("/api/shadow-convergence")
+    def api_shadow_convergence():
+        """Ver ShadowLogger.get_convergence_report() — ganadores vs
+        perdedores, ¿convergen distinto?"""
+        try:
+            from shadow_logger import get_shadow_logger
+            return jsonify(get_shadow_logger().get_convergence_report())
+        except Exception as e:
+            return jsonify({"error": str(e)})
+
     @app.route("/api/shadow-liquidity-by-hour")
     def api_shadow_liquidity_by_hour():
         """Ver ShadowLogger.get_liquidity_by_hour_report() — proxy de
