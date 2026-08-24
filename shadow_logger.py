@@ -212,7 +212,13 @@ class ShadowLogger:
             logger.error(f"ShadowLogger DB error: {e}")
             self.conn = None
 
-    PRICE_TICK_MAX_PRICE = 0.45  # un poco por arriba de la zona explosiva (<0.35) para capturar cómo llega ahí
+    # Ampliado de 0.45 a 0.55 (24-ago-2026, banda barata completa): con
+    # el loop principal corriendo cada ~10s, muchos mercados solo pasaban
+    # 20-30s por debajo de 0.45 antes de resolver o salir de esa zona —
+    # 31 de 48 mercados en los primeros 2 días quedaron con menos de 3
+    # fotos, muy poco para ver cómo se mueve el precio. Ampliar la ventana
+    # de precio da más tiempo dentro de la zona capturada por mercado.
+    PRICE_TICK_MAX_PRICE = 0.55
 
     def log_price_tick(self, market, twap60_open, twap60_now, seconds_remaining):
         """Sin guard de 'una vez por mercado' a propósito — ver
@@ -1061,7 +1067,7 @@ class ShadowLogger:
             "magnitude_q4_and_agreement": run(min_rel_delta=0.00023, require_agreement=True),
         }
 
-    def get_convergence_report(self, min_ticks=3) -> dict:
+    def get_convergence_report(self, min_ticks=2) -> dict:
         """Primera lectura de shadow_price_ticks (instrumentado 22-ago-2026
         para la hipótesis de "el CLOB está atrasado respecto al TWAP"). Para
         cada mercado con varias fotos guardadas, mira cómo se movió el
