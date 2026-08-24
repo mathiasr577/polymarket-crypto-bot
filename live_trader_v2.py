@@ -281,10 +281,26 @@ class LiveTraderV2:
 
     def _check_day_rollover(self):
         """Idéntica en espíritu a live_trader.py — ver ese archivo para el
-        bug real que motivó el patrón de reintento en vez de aceptar 0."""
+        bug real que motivó el patrón de reintento en vez de aceptar 0.
+
+        24-ago-2026: encontrado en producción que current_trading_day quedó
+        pegado en 2026-08-22 durante días, con day_start_balance de ese día
+        ($75.62) todavía activo mientras el balance real ya iba en ~$249 —
+        el freno de -25% se estaba calculando sobre una referencia vieja.
+        No se identificó con certeza por qué is_new_day nunca volvió a
+        evaluar True tras el primer rollover exitoso (log de diagnóstico
+        agregado abajo por si se repite). Mientras tanto, red de seguridad
+        explícita: si el día guardado quedó más de 1 día calendario atrás,
+        fuerza el rollover sin depender de la comparación normal."""
         today = (datetime.now(timezone.utc) + ET_OFFSET).date()
         with self._lock:
-            is_new_day = self.current_trading_day != today
+            stale_days = (today - self.current_trading_day).days if self.current_trading_day else None
+            is_new_day = self.current_trading_day != today or (stale_days is not None and stale_days > 1)
+            if is_new_day:
+                logger.info(
+                    f"LiveTraderV2 day check: stored={self.current_trading_day} today={today} "
+                    f"stale_days={stale_days} is_new_day={is_new_day}"
+                )
             needs_balance = is_new_day or not self.day_start_balance or self.day_start_balance <= 0
             if not needs_balance:
                 return
