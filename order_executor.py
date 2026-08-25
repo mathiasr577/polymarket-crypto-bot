@@ -115,6 +115,26 @@ def place_order(token_id: str, price: float, size: float, side: str = "BUY",
                 f"⚠️ No se pudo confirmar la cancelación de la orden {order_id} — "
                 f"estado de fill DESCONOCIDO: {cancel_resp}. Revisar manualmente en Polymarket."
             )
+            # 25-ago-2026: cruzando 44 unknown_fill de un día contra el
+            # historial real de Polymarket, las 44 SÍ se habían llenado
+            # completas — el "desconocido" es casi siempre en realidad un
+            # llenado que terminó de completarse justo antes de que
+            # llegara nuestro cancel. Una guía de terceros (no la fuente
+            # oficial) documenta client.get_order(order_id) devolviendo
+            # status/size_matched/original_size — coincide con lo que
+            # necesitaríamos, pero no se va a confiar en eso a ciegas para
+            # algo que toca plata real. Por ahora SOLO se loguea la
+            # respuesta cruda si el método existe y no rompe nada — una vez
+            # que se vea la forma real un par de veces, recién ahí se usa
+            # para reclasificar en vez de asumir el peor caso siempre.
+            try:
+                if hasattr(client, "get_order"):
+                    order_status = client.get_order(order_id)
+                    logger.info(f"🔍 get_order({order_id[:20]}...) diagnóstico: {order_status}")
+                else:
+                    logger.debug("El cliente CLOB no tiene get_order — no se puede diagnosticar más.")
+            except Exception as ge:
+                logger.debug(f"get_order diagnóstico falló (esperado si el método no existe así): {ge}")
             return {"error": "cancel not confirmed, fill status unknown", "unknown_fill": True, "order_id": order_id}
 
         return {"error": f"unexpected status: {status}"}
