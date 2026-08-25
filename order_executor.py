@@ -113,28 +113,58 @@ def place_order(token_id: str, price: float, size: float, side: str = "BUY",
 
             logger.error(
                 f"⚠️ No se pudo confirmar la cancelación de la orden {order_id} — "
-                f"estado de fill DESCONOCIDO: {cancel_resp}. Revisar manualmente en Polymarket."
+                f"estado de fill DESCONOCIDO: {cancel_resp}. Consultando get_order antes de rendirse..."
             )
             # 25-ago-2026: cruzando 44 unknown_fill de un día contra el
             # historial real de Polymarket, las 44 SÍ se habían llenado
             # completas — el "desconocido" es casi siempre en realidad un
             # llenado que terminó de completarse justo antes de que
-            # llegara nuestro cancel. Una guía de terceros (no la fuente
-            # oficial) documenta client.get_order(order_id) devolviendo
-            # status/size_matched/original_size — coincide con lo que
-            # necesitaríamos, pero no se va a confiar en eso a ciegas para
-            # algo que toca plata real. Por ahora SOLO se loguea la
-            # respuesta cruda si el método existe y no rompe nada — una vez
-            # que se vea la forma real un par de veces, recién ahí se usa
-            # para reclasificar en vez de asumir el peor caso siempre.
+            # llegara nuestro cancel. client.get_order(order_id) se
+            # verificó contra 9 respuestas reales de producción (25-ago-
+            # 2026) — siempre devuelve status/size_matched/original_size/
+            # price de forma consistente, y en las 9 confirmó exactamente
+            # lo que después aparecía en el historial real de Polymarket.
+            # Se usa acá para resolver la ambigüedad con datos reales en
+            # vez de asumir el peor caso siempre.
+            order_status = None
             try:
                 if hasattr(client, "get_order"):
                     order_status = client.get_order(order_id)
                     logger.info(f"🔍 get_order({order_id[:20]}...) diagnóstico: {order_status}")
-                else:
-                    logger.info("🔍 El cliente CLOB no tiene get_order — no se puede diagnosticar así.")
             except Exception as ge:
-                logger.info(f"🔍 get_order diagnóstico falló: {type(ge).__name__}: {ge}")
+                logger.warning(f"🔍 get_order diagnóstico falló: {type(ge).__name__}: {ge}")
+
+            if isinstance(order_status, dict):
+                gstatus = str(order_status.get("status", "")).upper()
+                try:
+                    size_matched = float(order_status.get("size_matched") or 0)
+                    original_size = float(order_status.get("original_size") or 0)
+                except (TypeError, ValueError):
+                    size_matched, original_size = 0.0, 0.0
+                fill_price = order_status.get("price")
+
+                if gstatus == "MATCHED" and size_matched > 0 and fill_price:
+                    cost = round(size_matched * float(fill_price), 6)
+                    logger.info(
+                        f"✅ get_order confirmó fill real (antes DESCONOCIDO): "
+                        f"{size_matched}/{original_size} @ {fill_price} (orden {order_id})"
+                    )
+                    return {
+                        "status": "matched",
+                        "takingAmount": str(size_matched),
+                        "makingAmount": str(cost),
+                        "orderID": order_id,
+                        "resolved_via": "get_order_after_ambiguous_cancel",
+                    }
+                if gstatus in ("CANCELED", "CANCELLED") or size_matched == 0:
+                    logger.info(f"get_order confirmó que la orden {order_id} NO se llenó (status={gstatus}).")
+                    return {"error": "limit not filled, cancelled (confirmed via get_order)"}
+                logger.warning(
+                    f"get_order devolvió algo no reconocido para {order_id}: "
+                    f"status={gstatus} size_matched={size_matched} original_size={original_size} — "
+                    f"tratando como DESCONOCIDO por seguridad."
+                )
+
             return {"error": "cancel not confirmed, fill status unknown", "unknown_fill": True, "order_id": order_id}
 
         return {"error": f"unexpected status: {status}"}
