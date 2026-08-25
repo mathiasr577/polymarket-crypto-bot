@@ -132,9 +132,9 @@ def place_order(token_id: str, price: float, size: float, side: str = "BUY",
                     order_status = client.get_order(order_id)
                     logger.info(f"🔍 get_order({order_id[:20]}...) diagnóstico: {order_status}")
                 else:
-                    logger.debug("El cliente CLOB no tiene get_order — no se puede diagnosticar más.")
+                    logger.info("🔍 El cliente CLOB no tiene get_order — no se puede diagnosticar así.")
             except Exception as ge:
-                logger.debug(f"get_order diagnóstico falló (esperado si el método no existe así): {ge}")
+                logger.info(f"🔍 get_order diagnóstico falló: {type(ge).__name__}: {ge}")
             return {"error": "cancel not confirmed, fill status unknown", "unknown_fill": True, "order_id": order_id}
 
         return {"error": f"unexpected status: {status}"}
