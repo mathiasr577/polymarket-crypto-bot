@@ -35,7 +35,12 @@ from config import DRAWDOWN_LIMIT, DATABASE_URL
 logger = logging.getLogger(__name__)
 
 MAX_LIVE_TRADES = 1_000_000  # sin techo real de trades — corre indefinido
-TRADE_SIZE = 5.0             # techo de sizing, mismo valor conservador que v1 al arrancar
+# Subido de $5 a $7 (25-ago-2026) tras confirmar el fix de unknown_fill
+# (get_order) funcionando limpio un día completo — con el balance de ese
+# día (~$376-380), 5 pérdidas seguidas al TOPE ($13 c/u, ver
+# LIVE_MAX_STAKE_USD) son ~$65, un 68% del margen de -25% (~$95) — deja
+# aire para una mañana floja típica antes de que el circuit breaker actúe.
+TRADE_SIZE = 7.0
 MAX_NO_FILLS_HISTORY = 20
 
 # Mismo esquema de sizing proporcional al balance que ya validamos en v1
@@ -44,12 +49,12 @@ MAX_NO_FILLS_HISTORY = 20
 TARGET_RISK_PCT = 0.08
 MIN_TRADE_USD = 2.0
 
-# Techo absoluto para el sizing por confirmaciones (24-ago-2026) — ver
-# _current_trade_size(). Independiente de TRADE_SIZE (el techo base sin
-# multiplicador, $5) — este es el techo de lo que se puede llegar a
-# arriesgar en UN trade con el multiplicador aplicado, decisión explícita
-# del usuario, no calculado.
-LIVE_MAX_STAKE_USD = 10.0
+# Techo absoluto para el sizing por confirmaciones (24-ago-2026, subido de
+# $10 a $13 el 25-ago-2026 junto con TRADE_SIZE) — ver _current_trade_size().
+# Independiente de TRADE_SIZE (el techo base sin multiplicador) — este es
+# el techo de lo que se puede llegar a arriesgar en UN trade con el
+# multiplicador aplicado, decisión explícita del usuario, no calculado.
+LIVE_MAX_STAKE_USD = 13.0
 
 # Fase temprana de plata real (20-ago-2026, revisión pre-lanzamiento con la
 # otra IA): el primer día no valida el modelo — valida que la EJECUCIÓN real
