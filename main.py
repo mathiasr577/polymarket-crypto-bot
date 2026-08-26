@@ -265,7 +265,11 @@ def _tick(scanner, feed, paper, live, shadow=None, chainlink=None, paper_v2=None
 
                     # Live v2 — solo si LIVE_V2_ENABLED, y mismo horario que
                     # v1 (9AM-6PM ET, probado y necesario por liquidez).
+                    # Bandas en config.LIVE_V2_DISABLED_BANDS quedan pausadas
+                    # SOLO acá (paper_v2 arriba no se toca, sigue juntando
+                    # datos de esa banda para poder investigar y reactivarla).
                     if (trading_hours and live_v2 and market_id not in live_v2_open
+                            and signal_v2["band"] not in config.LIVE_V2_DISABLED_BANDS
                             and live_v2.can_trade()):
                         v2_live_asset_open = [p for p in live_v2.open_positions.values() if p.get("asset") == asset]
                         if not v2_live_asset_open:

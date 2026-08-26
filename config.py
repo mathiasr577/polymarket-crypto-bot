@@ -52,3 +52,15 @@ SHADOW_MODE_ENABLED = os.environ.get("SHADOW_MODE_ENABLED", "true").lower() == "
 # deploy hasta que se toquen las variables de entorno en Railway a mano).
 LIVE_V1_ENABLED = os.environ.get("LIVE_V1_ENABLED", "false").lower() == "true"
 LIVE_V2_ENABLED = os.environ.get("LIVE_V2_ENABLED", "false").lower() == "true"
+
+# Pausa por banda para plata real de v2, sin tocar paper/shadow (que siguen
+# corriendo esa banda para no perder el diagnóstico en curso). 26-ago-2026:
+# la banda barata viene rindiendo muy por debajo de lo que muestra
+# shadow-logging (68% en toda la población vs 11-36% real en lo que
+# efectivamente tradeamos, varios días seguidos) — se pausa en plata real
+# hasta entender por qué, sin esperar a tener la respuesta antes de frenar
+# la pérdida. Formato: nombres de banda separados por coma en la env var
+# (ej. "cheap,mid_confirmed"), vacío = nada pausado.
+LIVE_V2_DISABLED_BANDS = set(
+    b.strip() for b in os.environ.get("LIVE_V2_DISABLED_BANDS", "cheap").split(",") if b.strip()
+)
