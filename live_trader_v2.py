@@ -333,6 +333,15 @@ class LiveTraderV2:
                 self.current_trading_day = today
                 self.today_pnl = 0.0
                 self._drawdown_paused = False
+                # 26-ago-2026: self.results (pnl/win_rate/by_band mostrados)
+                # nunca se vaciaba acá — si el proceso corre sin reiniciarse
+                # de un día a otro, se pondría a sumar mezclado lo de ayer
+                # con lo de hoy. El usuario pidió explícitamente que ese
+                # número sea SOLO el del día, no acumulado — con los
+                # despliegues frecuentes de esta semana nunca se notó
+                # (cada uno ya vaciaba self.results de por sí), pero apenas
+                # pase un día entero sin deploy se hubiera visto mal.
+                self.results = []
 
         balance = self.get_balance()
         if not balance or balance <= 0:
