@@ -253,6 +253,26 @@ class LiveTraderV2:
                 for row in cur.fetchall():
                     self.open_positions[row["market_id"]] = dict(row)
 
+                # 26-ago-2026: self.results (de donde sale "P&L Total"/win_rate/
+                # by_band en el dashboard) NUNCA se reconstruía desde la base de
+                # datos acá — solo se llenaba con lo que resolvía DESPUÉS de
+                # arrancar este proceso. Cada redeploy (bastante seguidos esta
+                # semana) reseteaba ese número a $0 aunque today_pnl (que sí se
+                # persiste) siguiera reflejando el día real — el "P&L Total" se
+                # veía roto/inconsistente hasta reconstruirse solo con las
+                # operaciones nuevas de esa sesión. Se carga acá lo ya resuelto
+                # HOY (mismo criterio de "día" que current_trading_day, offset
+                # ET) para que el número esté completo desde el primer segundo.
+                if self.current_trading_day:
+                    cur.execute("""
+                        SELECT * FROM live_trades_v2
+                        WHERE resolved_at IS NOT NULL
+                          AND (resolved_at AT TIME ZONE 'UTC' - INTERVAL '4 hours')::date = %s
+                        ORDER BY resolved_at ASC
+                    """, (self.current_trading_day,))
+                    for row in cur.fetchall():
+                        self.results.append(dict(row))
+
                 # total_trades cuenta CUALQUIER fila insertada (fills reales,
                 # se inserta solo en el camino de éxito de _execute_order) —
                 # no solo las resueltas. Un restart de Railway a mitad de día
@@ -265,7 +285,7 @@ class LiveTraderV2:
             logger.info(
                 f"LiveTraderV2 state restored: day_start_balance={self.day_start_balance} "
                 f"today_pnl={self.today_pnl} open_positions={len(self.open_positions)} "
-                f"total_trades={self.total_trades}"
+                f"total_trades={self.total_trades} results_loaded_today={len(self.results)}"
             )
         except Exception as e:
             logger.error(f"LiveTraderV2 load state error: {e}")
