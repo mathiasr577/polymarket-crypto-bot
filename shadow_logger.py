@@ -1221,7 +1221,8 @@ class ShadowLogger:
             with self.conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 cur.execute("""
                     SELECT actual_outcome, polymarket_up_price, polymarket_down_price,
-                           twap60_open, twap60_now, market_open_timestamp
+                           twap60_open, twap60_now, market_open_timestamp,
+                           chainlink_spot_now, ofi_15s, twap_pressure_integral
                     FROM shadow_decisions
                     WHERE resolved_at IS NOT NULL AND NOT data_gap
                       AND twap60_open IS NOT NULL AND twap60_now IS NOT NULL
@@ -1235,7 +1236,13 @@ class ShadowLogger:
         now = datetime.now(timezone.utc)
         cutoff = now - timedelta(days=days_recent)
 
-        bands = {"cheap": (0.0, 0.55), "favorite": (0.75, 0.97)}
+        # 28-ago-2026: se agrega "mid" (mid_confirmed) — mismo rango de
+        # precio 0.55-0.75 que usa signal_engine_v2, pero además exige 2+
+        # de 3 confirmaciones (igual que la política real desplegada, ver
+        # MID_ZONE_MIN_CONFIRMATIONS) para que este reporte refleje lo que
+        # de verdad se tradearía si se reactiva, no el rango de precio
+        # crudo sin filtrar.
+        bands = {"cheap": (0.0, 0.55), "mid": (0.55, 0.75), "favorite": (0.75, 0.97)}
         result = {}
         for band_name, (lo, hi) in bands.items():
             buckets = {"recent": {"n": 0, "wins": 0, "pnl": 0.0}, "historical": {"n": 0, "wins": 0, "pnl": 0.0}}
@@ -1251,6 +1258,20 @@ class ShadowLogger:
                 price = row["polymarket_up_price"] if side == "UP" else row["polymarket_down_price"]
                 if price is None or not (lo <= price < hi):
                     continue
+                if band_name == "mid":
+                    count = 0
+                    if row["chainlink_spot_now"] is not None:
+                        lead_diff = row["chainlink_spot_now"] - row["twap60_now"]
+                        if lead_diff != 0 and (("UP" if lead_diff > 0 else "DOWN") == side):
+                            count += 1
+                    if row["ofi_15s"] is not None and row["ofi_15s"] != 0:
+                        if (("UP" if row["ofi_15s"] > 0 else "DOWN") == side):
+                            count += 1
+                    if row["twap_pressure_integral"] is not None and row["twap_pressure_integral"] != 0:
+                        if (("UP" if row["twap_pressure_integral"] > 0 else "DOWN") == side):
+                            count += 1
+                    if count < 2:
+                        continue
                 win = side == row["actual_outcome"]
                 pnl = stake * ((1 - price) / price) * (1 - fee) if win else -stake
                 bucket = "recent" if row["market_open_timestamp"] >= cutoff else "historical"
