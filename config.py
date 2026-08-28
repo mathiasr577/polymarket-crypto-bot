@@ -54,22 +54,25 @@ LIVE_V1_ENABLED = os.environ.get("LIVE_V1_ENABLED", "false").lower() == "true"
 LIVE_V2_ENABLED = os.environ.get("LIVE_V2_ENABLED", "false").lower() == "true"
 
 # Pausa por banda para plata real de v2, sin tocar paper/shadow (que siguen
-# corriendo esa banda para no perder el diagnóstico en curso). 26-ago-2026:
-# la banda barata viene rindiendo muy por debajo de lo que muestra
-# shadow-logging (68% en toda la población vs 11-36% real en lo que
-# efectivamente tradeamos, varios días seguidos) — se pausa en plata real
-# hasta entender por qué, sin esperar a tener la respuesta antes de frenar
-# la pérdida. Formato: nombres de banda separados por coma en la env var
-# (ej. "cheap,mid_confirmed"), vacío = nada pausado.
+# corriendo esa banda para no perder el diagnóstico en curso). Formato:
+# nombres de banda separados por coma en la env var, vacío = nada pausado.
 #
-# 28-ago-2026: se suma mid_confirmed. 3 días reales (25-27 ago): neta
-# -$9.12 en 54 trades, pero con varianza enorme alrededor de casi cero
-# (-$3.68, +$50.23, -$55.67 por día) — el 27 sola esa banda dio -$55.67
-# mientras favorita cerraba positiva. Además, a precio de entrada típico
-# ~0.72 el breakeven ronda ~73%, y el backtest de 2 confirmaciones (el
-# nivel más común en esta banda) promete 69.5% — por debajo, no por
-# arriba. Se pausa mientras se investiga con más datos si el precio real
-# de entrada en vivo está corriéndose hacia el filo de esa banda.
+# Historial: 26-ago-2026 se pausó "cheap" (11-36% real vs 68% en shadow
+# varios días seguidos). 28-ago-2026 se sumó "mid_confirmed" tras un día
+# de -$55.67 en esa banda con plata real.
+#
+# 28-ago-2026 (reactivación): con /api/shadow-band-recency ya cubriendo
+# las 3 bandas (antes solo cheap/favorite), los últimos 3 días de shadow-
+# logging (población completa, mucho más grande que lo poco que se
+# tradeó en vivo) muestran las dos bandas SANAS, no degradadas:
+#   cheap: 69.3% reciente vs 68.3% histórico (n=319) — consistente.
+#   mid:   79.0% reciente vs 72.9% histórico (n=195) — mejor, no peor.
+# Esto indica que las pérdidas puntuales en vivo (barata varios días,
+# media el 27-ago) fueron ruido de muestra chica (lo que efectivamente
+# se tradeó en vivo es una fracción mínima de lo que shadow evalúa), no
+# una señal real rompiéndose — se reactivan las dos. Favorite, en
+# cambio, sí mostró compresión real (0.122->0.054 $/trade reciente,
+# n=779) — se deja activa pero vigilada, no se pausó por seguir positiva.
 LIVE_V2_DISABLED_BANDS = set(
-    b.strip() for b in os.environ.get("LIVE_V2_DISABLED_BANDS", "cheap,mid_confirmed").split(",") if b.strip()
+    b.strip() for b in os.environ.get("LIVE_V2_DISABLED_BANDS", "").split(",") if b.strip()
 )
