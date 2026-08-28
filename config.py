@@ -61,6 +61,15 @@ LIVE_V2_ENABLED = os.environ.get("LIVE_V2_ENABLED", "false").lower() == "true"
 # hasta entender por qué, sin esperar a tener la respuesta antes de frenar
 # la pérdida. Formato: nombres de banda separados por coma en la env var
 # (ej. "cheap,mid_confirmed"), vacío = nada pausado.
+#
+# 28-ago-2026: se suma mid_confirmed. 3 días reales (25-27 ago): neta
+# -$9.12 en 54 trades, pero con varianza enorme alrededor de casi cero
+# (-$3.68, +$50.23, -$55.67 por día) — el 27 sola esa banda dio -$55.67
+# mientras favorita cerraba positiva. Además, a precio de entrada típico
+# ~0.72 el breakeven ronda ~73%, y el backtest de 2 confirmaciones (el
+# nivel más común en esta banda) promete 69.5% — por debajo, no por
+# arriba. Se pausa mientras se investiga con más datos si el precio real
+# de entrada en vivo está corriéndose hacia el filo de esa banda.
 LIVE_V2_DISABLED_BANDS = set(
-    b.strip() for b in os.environ.get("LIVE_V2_DISABLED_BANDS", "cheap").split(",") if b.strip()
+    b.strip() for b in os.environ.get("LIVE_V2_DISABLED_BANDS", "cheap,mid_confirmed").split(",") if b.strip()
 )
