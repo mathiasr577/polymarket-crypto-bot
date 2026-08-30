@@ -81,6 +81,17 @@ LIVE_V2_ENABLED = os.environ.get("LIVE_V2_ENABLED", "false").lower() == "true"
 # Coincide con dos días seguidos en rojo con plata real (-$24.78 el 28,
 # -$45.95 el 29). A diferencia de cheap/mid, acá SÍ hay evidencia real y
 # de muestra grande de degradación, no ruido — se pausa también.
+#
+# 30-ago-2026 (fix real, no solo pausa): shadow-logging por sub-banda fina
+# (get_favorite_recency_by_subband) localizó la degradación: no es toda la
+# banda favorite, se concentra en [0.75-0.80) — reciente -$0.346/trade vs
+# +$0.273 histórico (n=92), justo pegado al límite con mid_confirmed pero
+# sin su filtro de 2+ confirmaciones. El resto de la banda (0.80-0.97)
+# sigue sano salvo un tramo más chico y menos claro en 0.93-0.95 (n=126,
+# sin frontera natural para cortar, se deja en observación). Se sube
+# FAVORITE_MIN de 0.75 a 0.80 en signal_engine_v2.py para excluir el tramo
+# roto de raíz (en vez de dejar la banda entera parada sin arreglar nada),
+# y se reactiva favorite en plata real ya recortada.
 LIVE_V2_DISABLED_BANDS = set(
-    b.strip() for b in os.environ.get("LIVE_V2_DISABLED_BANDS", "favorite").split(",") if b.strip()
+    b.strip() for b in os.environ.get("LIVE_V2_DISABLED_BANDS", "").split(",") if b.strip()
 )

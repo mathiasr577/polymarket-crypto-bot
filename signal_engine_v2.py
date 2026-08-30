@@ -57,8 +57,20 @@ logger = logging.getLogger(__name__)
 # real, no solo el % de acierto: +$52.27 en 254 trades, $0.206/trade en
 # promedio (mejor que el promedio de la banda 0.85-0.97, $0.19/trade). Ver
 # /api/shadow-favorite-extension.
+#
+# FAVORITE_MIN subido de 0.75 a 0.80 (29-ago-2026): favorite se comprimió
+# ~90% en $/trade en los últimos 3 días reales (dos días seguidos en rojo
+# con plata real), pero NO parejo — /api/shadow-favorite-recency-subband
+# mostró que el tramo 0.75-0.80 específicamente se dio vuelta (72.8%
+# reciente vs 82.7% histórico, -$0.35/trade reciente vs +$0.27 histórico,
+# n=92) mientras 0.80-0.97 seguía sano (~$0.058/trade reciente sacando
+# ese tramo). Justo el tramo pegado al límite con mid_confirmed, que sí
+# exige 2+ confirmaciones — este no exigía ninguna. Se saca ese tramo en
+# vez de pausar toda la banda; 0.93-0.95 también mostró debilidad
+# reciente pero con muestra más chica (n=126) y sin una frontera natural
+# para recortarlo limpio — queda para seguir vigilando, no se tocó.
 CHEAP_MAX = 0.55
-FAVORITE_MIN = 0.75
+FAVORITE_MIN = 0.80
 FAVORITE_MAX = 0.97
 MIN_REL_DELTA_CHEAP = 0.0001
 TRADE_FAVORITE_BAND = True
