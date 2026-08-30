@@ -143,6 +143,25 @@ CREATE TABLE IF NOT EXISTS live_state_v2 (
 );
 
 INSERT INTO live_state_v2 (id) VALUES (1) ON CONFLICT (id) DO NOTHING;
+
+-- 30-ago-2026: agregada tras el peor día de plata real a la fecha
+-- (-$98.52 en solo 19 trades) — para decidir si el DRAWDOWN_LIMIT debía
+-- bajarse hubo que reconstruir a mano el drawdown % de cada día anterior
+-- y no se pudo con certeza porque live_state_v2 solo guarda el ESTADO
+-- ACTUAL (se pisa cada rollover) — no hay forma de saber qué tan cerca
+-- estuvo cada día pasado del límite. Esta tabla guarda un renglón por
+-- día al cerrar (rollover), para que la próxima vez que haga falta
+-- ajustar el breaker haya datos reales en vez de tener que adivinar.
+CREATE TABLE IF NOT EXISTS live_day_history_v2 (
+    id SERIAL PRIMARY KEY,
+    trading_day DATE,
+    day_start_balance FLOAT,
+    day_end_balance FLOAT,
+    pnl FLOAT,
+    trades_count INT,
+    drawdown_paused BOOLEAN,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
 """
 
 
@@ -345,7 +364,16 @@ class LiveTraderV2:
             needs_balance = is_new_day or not self.day_start_balance or self.day_start_balance <= 0
             if not needs_balance:
                 return
+            closing_day = closing_day_start = closing_pnl = closing_trades = closing_paused = None
             if is_new_day:
+                # Capturar el resumen del día que se cierra ANTES de resetear,
+                # para persistirlo abajo — ver comentario de live_day_history_v2.
+                if self.current_trading_day is not None and self.day_start_balance:
+                    closing_day = self.current_trading_day
+                    closing_day_start = self.day_start_balance
+                    closing_pnl = self.today_pnl
+                    closing_trades = len(self.results)
+                    closing_paused = self._drawdown_paused
                 self.current_trading_day = today
                 self.today_pnl = 0.0
                 self._drawdown_paused = False
@@ -370,7 +398,25 @@ class LiveTraderV2:
         with self._lock:
             self.day_start_balance = balance
         self._save_day_state()
+        if closing_day is not None:
+            # balance de hoy ≈ balance de cierre de ayer (no hay trades fuera
+            # de horario) — aproximación, no un cierre exacto medido en el
+            # instante justo de las 00:00 ET.
+            self._save_day_history(closing_day, closing_day_start, balance, closing_pnl, closing_trades, closing_paused)
         logger.info(f"LiveTraderV2 trading day {today}: day_start_balance=${balance:.2f}")
+
+    def _save_day_history(self, trading_day, day_start_balance, day_end_balance, pnl, trades_count, drawdown_paused):
+        if not self.conn:
+            return
+        try:
+            with self.conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO live_day_history_v2
+                        (trading_day, day_start_balance, day_end_balance, pnl, trades_count, drawdown_paused)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                """, (trading_day, day_start_balance, day_end_balance, pnl, trades_count, drawdown_paused))
+        except Exception as e:
+            logger.error(f"LiveTraderV2: error guardando live_day_history_v2: {e}")
 
     def can_trade(self) -> bool:
         self._check_day_rollover()

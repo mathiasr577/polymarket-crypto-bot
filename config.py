@@ -18,7 +18,20 @@ MAX_POSITION_PCT = 0.05       # 5% base
 MAX_POSITION_PCT_KELLY = 0.10 # 10% max with Kelly
 MIN_TRADE_USD = 5.0
 MAX_SIMULTANEOUS = 5
-DRAWDOWN_LIMIT = 0.25         # pause new live trades for the day at -25% of the day's starting balance
+# Bajado de 0.25 a 0.20 (30-ago-2026) tras el peor día de plata real a la
+# fecha: -$98.52 en solo 19 trades (~2 horas), confirmado con datos reales
+# (no ejecución rota — paper_v2, con muestra ~10x más grande, degradó
+# igual de fuerte en esa misma ventana horaria antes de volver a lo normal
+# después de las 11 AM ET: riesgo de cola real de la estrategia, no un
+# bug). Reconstruyendo trade por trade lo que pasó hoy: con 0.20 el freno
+# hubiera cortado 2 trades antes (ahorrando ~$15 de los ~$98). No se pudo
+# backtestear contra los 8 días anteriores de plata real con certeza —
+# live_state_v2 solo guarda el día ACTUAL, no quedó registro del drawdown
+# % que tuvo cada día pasado (ninguno llegó a pausarse, pero no sé qué tan
+# cerca estuvo el peor, ej. 27-ago -$47.06). Se agrega live_day_history_v2
+# en live_trader_v2.py para tener esos datos la próxima vez. 0.20 es un
+# punto medio razonable, no un número optimizado contra historial real.
+DRAWDOWN_LIMIT = 0.20         # pause new live trades for the day at -20% of the day's starting balance
 TRADING_START_UTC = 13        # 9AM ET = 1PM UTC
 TRADING_END_UTC = 22          # 6PM ET = 10PM UTC
 MAX_VOLATILITY_PCT = 0.005    # 0.5%
