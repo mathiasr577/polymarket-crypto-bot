@@ -606,6 +606,16 @@ def create_dashboard(get_stats_fn, get_prices_fn, get_markets_fn=None, mode="PAP
         except Exception as e:
             return jsonify({"error": str(e)})
 
+    @app.route("/api/shadow-favorite-recency-subband")
+    def api_shadow_favorite_recency_subband():
+        """Ver ShadowLogger.get_favorite_recency_by_subband() — dónde
+        exactamente se concentra la compresión de margen de favorite."""
+        try:
+            from shadow_logger import get_shadow_logger
+            return jsonify(get_shadow_logger().get_favorite_recency_by_subband())
+        except Exception as e:
+            return jsonify({"error": str(e)})
+
     @app.route("/api/shadow-band-recency")
     def api_shadow_band_recency():
         """Ver ShadowLogger.get_band_recency_report() — últimos N días vs.

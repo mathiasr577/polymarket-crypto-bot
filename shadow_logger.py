@@ -1205,6 +1205,84 @@ class ShadowLogger:
             "note": "avg_sum_up_down más bajo y estable = mercado más activo; más alto o disperso = menos gente cotizando",
         }
 
+    def get_favorite_recency_by_subband(self, days_recent=3, stake=5.0, fee=0.07) -> dict:
+        """29-ago-2026: get_band_recency_report() muestra que favorite se
+        comprimió en $/trade (-90%) sin que el acierto cambiara casi nada —
+        eso es SÍNTOMA, no diagnóstico. La pregunta real: ¿la compresión
+        está pareja en toda la banda (0.75-0.97), o concentrada en un
+        tramo específico (como pasó antes con la cola 0.97-0.99, que
+        obligó a poner FAVORITE_MAX)? Sub-divide en los mismos tramos
+        finos que get_favorite_band_detail, pero separando reciente vs.
+        histórico en cada uno, para ver DÓNDE se mueve el precio típico
+        y DÓNDE se concentra la pérdida de margen."""
+        if not self.conn:
+            return {}
+        try:
+            with self.conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute("""
+                    SELECT actual_outcome, polymarket_up_price, polymarket_down_price,
+                           twap60_open, twap60_now, market_open_timestamp
+                    FROM shadow_decisions
+                    WHERE resolved_at IS NOT NULL AND NOT data_gap
+                      AND twap60_open IS NOT NULL AND twap60_now IS NOT NULL
+                      AND market_open_timestamp IS NOT NULL
+                """)
+                rows = cur.fetchall()
+        except Exception as e:
+            logger.error(f"Favorite recency by subband error: {e}")
+            return {}
+
+        def breakeven(price):
+            return price / (price + (1 - fee) * (1 - price))
+
+        now = datetime.now(timezone.utc)
+        cutoff = now - timedelta(days=days_recent)
+        sub_bands = [(0.75, 0.80), (0.80, 0.85), (0.85, 0.90), (0.90, 0.93), (0.93, 0.95), (0.95, 0.97)]
+
+        report = []
+        overall_price_sum = {"recent": 0.0, "recent_n": 0, "historical": 0.0, "historical_n": 0}
+        for lo, hi in sub_bands:
+            buckets = {"recent": {"n": 0, "wins": 0, "pnl": 0.0}, "historical": {"n": 0, "wins": 0, "pnl": 0.0}}
+            for row in rows:
+                diff = row["twap60_now"] - row["twap60_open"]
+                if diff == 0:
+                    continue
+                side = "UP" if diff > 0 else "DOWN"
+                price = row["polymarket_up_price"] if side == "UP" else row["polymarket_down_price"]
+                if price is None or not (lo <= price < hi):
+                    continue
+                win = side == row["actual_outcome"]
+                pnl = stake * ((1 - price) / price) * (1 - fee) if win else -stake
+                bucket = "recent" if row["market_open_timestamp"] >= cutoff else "historical"
+                b = buckets[bucket]
+                b["n"] += 1
+                b["pnl"] += pnl
+                if win:
+                    b["wins"] += 1
+                overall_price_sum[bucket] += price
+                overall_price_sum[f"{bucket}_n"] += 1
+
+            mid = (lo + hi) / 2
+            row_out = {"band": f"{lo:.2f}-{hi:.2f}", "breakeven_at_midpoint": round(breakeven(mid), 4)}
+            for k in ("recent", "historical"):
+                b = buckets[k]
+                row_out[k] = {
+                    "n": b["n"],
+                    "win_rate": round(b["wins"] / b["n"], 3) if b["n"] else None,
+                    "total_pnl": round(b["pnl"], 2),
+                    "avg_pnl_per_trade": round(b["pnl"] / b["n"], 4) if b["n"] else None,
+                }
+            report.append(row_out)
+
+        avg_price_recent = overall_price_sum["recent"] / overall_price_sum["recent_n"] if overall_price_sum["recent_n"] else None
+        avg_price_historical = overall_price_sum["historical"] / overall_price_sum["historical_n"] if overall_price_sum["historical_n"] else None
+        return {
+            "sub_bands": report,
+            "avg_entry_price_recent": round(avg_price_recent, 4) if avg_price_recent else None,
+            "avg_entry_price_historical": round(avg_price_historical, 4) if avg_price_historical else None,
+            "note": "si avg_entry_price subió, la compresión puede ser solo aritmética de precio más alto, no un cambio real de acierto por tramo",
+        }
+
     def get_band_recency_report(self, days_recent=3, min_rel_delta=0.0001, stake=5.0, fee=0.07) -> dict:
         """23-ago-2026: tres días seguidos (21, 22 sin los dos golpes de
         suerte, 23) la banda barata rindió mal en lo REALMENTE tradeado —
