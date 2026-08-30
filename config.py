@@ -73,6 +73,14 @@ LIVE_V2_ENABLED = os.environ.get("LIVE_V2_ENABLED", "false").lower() == "true"
 # una señal real rompiéndose — se reactivan las dos. Favorite, en
 # cambio, sí mostró compresión real (0.122->0.054 $/trade reciente,
 # n=779) — se deja activa pero vigilada, no se pausó por seguir positiva.
+#
+# 29-ago-2026: la compresión de favorite se profundizó y confirmó con
+# muestra todavía más grande — $/trade reciente cayó a $0.013 (n=837,
+# vs $0.116 histórico), el acierto casi no cambió (89.7% vs 90.9%) así
+# que no es que empiece a perder, es que el margen se evaporó un ~90%.
+# Coincide con dos días seguidos en rojo con plata real (-$24.78 el 28,
+# -$45.95 el 29). A diferencia de cheap/mid, acá SÍ hay evidencia real y
+# de muestra grande de degradación, no ruido — se pausa también.
 LIVE_V2_DISABLED_BANDS = set(
-    b.strip() for b in os.environ.get("LIVE_V2_DISABLED_BANDS", "").split(",") if b.strip()
+    b.strip() for b in os.environ.get("LIVE_V2_DISABLED_BANDS", "favorite").split(",") if b.strip()
 )
