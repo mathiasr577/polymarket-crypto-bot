@@ -40,7 +40,22 @@ MAX_LIVE_TRADES = 1_000_000  # sin techo real de trades — corre indefinido
 # día (~$376-380), 5 pérdidas seguidas al TOPE ($13 c/u, ver
 # LIVE_MAX_STAKE_USD) son ~$65, un 68% del margen de -25% (~$95) — deja
 # aire para una mañana floja típica antes de que el circuit breaker actúe.
-TRADE_SIZE = 7.0
+#
+# Bajado de $7 a $6 (30-ago-2026) tras el drawdown más grande a la fecha:
+# -$105 en solo ~2 horas (9:00-11:00 AM ET), breaker activado. Investigado
+# a fondo cruzando cada trade real contra paper_v2 en el MISMO market_id
+# exacto: 18/18 coincidieron en lado apostado y resultado, y paper_v2 en
+# esa misma ventana horaria también cayó (favorite 73%/mid 25% vs ~90%/
+# ~75% esperado) para volver a lo normal apenas pasó esa ventana (favorite
+# 89%, mid 75% después de las 11 AM ET). O sea: NO fue un bug de ejecución
+# ni mala suerte del muestreo chico de plata real — fue una ventana real
+# de ~2 horas donde el modelo completo (toda la población evaluada, no
+# solo lo que se tradeó en vivo) perdió más de lo normal en todas las
+# bandas a la vez. Eso no se arregla ajustando umbrales de banda (no es
+# degradación persistente como la de favorite el 29-ago) — es riesgo de
+# cola inherente a la estrategia. Se baja el tamaño para que una ventana
+# así duela menos la próxima vez, no para "arreglar" la señal.
+TRADE_SIZE = 6.0
 MAX_NO_FILLS_HISTORY = 20
 
 # Mismo esquema de sizing proporcional al balance que ya validamos en v1
@@ -50,11 +65,12 @@ TARGET_RISK_PCT = 0.08
 MIN_TRADE_USD = 2.0
 
 # Techo absoluto para el sizing por confirmaciones (24-ago-2026, subido de
-# $10 a $13 el 25-ago-2026 junto con TRADE_SIZE) — ver _current_trade_size().
-# Independiente de TRADE_SIZE (el techo base sin multiplicador) — este es
-# el techo de lo que se puede llegar a arriesgar en UN trade con el
-# multiplicador aplicado, decisión explícita del usuario, no calculado.
-LIVE_MAX_STAKE_USD = 13.0
+# $10 a $13 el 25-ago-2026 junto con TRADE_SIZE). Bajado de $13 a $11 el
+# 30-ago-2026 junto con TRADE_SIZE — ver comentario arriba. Independiente
+# de TRADE_SIZE (el techo base sin multiplicador) — este es el techo de lo
+# que se puede llegar a arriesgar en UN trade con el multiplicador
+# aplicado, decisión explícita del usuario, no calculado.
+LIVE_MAX_STAKE_USD = 11.0
 
 # Fase temprana de plata real (20-ago-2026, revisión pre-lanzamiento con la
 # otra IA): el primer día no valida el modelo — valida que la EJECUCIÓN real
