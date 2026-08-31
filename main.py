@@ -42,6 +42,12 @@ if config.SHADOW_MODE_ENABLED:
 if config.SHADOW_MODE_ENABLED:
     from order_flow_feed import start_order_flow_feed, get_order_flow_feed
 
+# Lean de Kalshi (KXBTC15M/KXETH15M) — shadow-only, no toca ninguna decisión
+# de trading todavía. Ver kalshi_feed.py — candidato a 4ta confirmación,
+# pendiente de validar en nuestro propio contexto antes de contar.
+if config.SHADOW_MODE_ENABLED:
+    from kalshi_feed import start_kalshi_feed, get_kalshi_feed
+
 # Delta mínimo del activo correlacionado para contar como confirmación cruzada
 CROSS_ASSET_MIN_DELTA = 0.0003
 
@@ -131,6 +137,7 @@ def trading_loop():
     chainlink = get_chainlink_feed() if config.SHADOW_MODE_ENABLED else None
     paper_v2 = get_trader_v2() if config.SHADOW_MODE_ENABLED else None
     order_flow = get_order_flow_feed() if config.SHADOW_MODE_ENABLED else None
+    kalshi = get_kalshi_feed() if config.SHADOW_MODE_ENABLED else None
 
     mode_desc = "LIVE-v1" if live else ("LIVE-v2" if live_v2 else "PAPER")
     if live and live_v2:
@@ -140,7 +147,7 @@ def trading_loop():
 
     while True:
         try:
-            _tick(scanner, feed, paper, live, shadow, chainlink, paper_v2, order_flow, live_v2)
+            _tick(scanner, feed, paper, live, shadow, chainlink, paper_v2, order_flow, live_v2, kalshi)
         except Exception as e:
             logger.error(f"Tick error: {e}")
         time.sleep(10)
@@ -168,7 +175,7 @@ def _cross_asset_confirm(feed, asset: str) -> str | None:
     return None
 
 
-def _tick(scanner, feed, paper, live, shadow=None, chainlink=None, paper_v2=None, order_flow=None, live_v2=None):
+def _tick(scanner, feed, paper, live, shadow=None, chainlink=None, paper_v2=None, order_flow=None, live_v2=None, kalshi=None):
     resolve_expired(paper)
 
     if paper_v2:
@@ -301,7 +308,7 @@ def _tick(scanner, feed, paper, live, shadow=None, chainlink=None, paper_v2=None
             # (data_gap ya lo marca) que perder la fila entera.
             if shadow and chainlink:
                 try:
-                    shadow.log_decision(market, {}, {}, chainlink, window_ts, market.get("ref_price"), order_flow_feed=order_flow)
+                    shadow.log_decision(market, {}, {}, chainlink, window_ts, market.get("ref_price"), order_flow_feed=order_flow, kalshi_feed=kalshi)
                 except Exception as e:
                     logger.debug(f"Shadow log_decision (sin Kraken) error: {e}")
             continue
@@ -326,7 +333,7 @@ def _tick(scanner, feed, paper, live, shadow=None, chainlink=None, paper_v2=None
 
         if shadow and chainlink:
             try:
-                shadow.log_decision(market, indicators, signal, chainlink, window_ts, market.get("ref_price"), order_flow_feed=order_flow)
+                shadow.log_decision(market, indicators, signal, chainlink, window_ts, market.get("ref_price"), order_flow_feed=order_flow, kalshi_feed=kalshi)
             except Exception as e:
                 logger.debug(f"Shadow log_decision error: {e}")
 
@@ -449,6 +456,7 @@ def main():
     if config.SHADOW_MODE_ENABLED:
         start_chainlink_feed()
         start_order_flow_feed()
+        start_kalshi_feed()
 
     t = threading.Thread(target=trading_loop, daemon=True)
     t.start()

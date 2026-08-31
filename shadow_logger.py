@@ -128,6 +128,13 @@ ALTER TABLE shadow_decisions ADD COLUMN IF NOT EXISTS ofi_5s FLOAT;
 ALTER TABLE shadow_decisions ADD COLUMN IF NOT EXISTS ofi_15s FLOAT;
 ALTER TABLE shadow_decisions ADD COLUMN IF NOT EXISTS ofi_30s FLOAT;
 ALTER TABLE shadow_decisions ADD COLUMN IF NOT EXISTS ofi_n_trades_30s INT;
+-- Lean de Kalshi (31-ago-2026, ver kalshi_feed.py) — candidato a 4ta
+-- confirmación, se loguea acá para validar en NUESTRO contexto de
+-- decisión antes de contar para nada en vivo.
+ALTER TABLE shadow_decisions ADD COLUMN IF NOT EXISTS kalshi_yes_ask FLOAT;
+ALTER TABLE shadow_decisions ADD COLUMN IF NOT EXISTS kalshi_lean FLOAT;
+ALTER TABLE shadow_decisions ADD COLUMN IF NOT EXISTS kalshi_seconds_left FLOAT;
+ALTER TABLE shadow_decisions ADD COLUMN IF NOT EXISTS kalshi_feed_connected BOOLEAN;
 
 -- Parte 2 de la idea de "staleness económica" (22-ago-2026): shadow_decisions
 -- guarda UNA sola fila por mercado (ON CONFLICT market_id DO NOTHING), así
@@ -267,7 +274,7 @@ class ShadowLogger:
         except Exception as e:
             logger.debug(f"log_price_tick error [{market.get('asset')}]: {e}")
 
-    def log_decision(self, market, indicators, signal, chainlink_feed, kraken_window_ts, kraken_ref_open, order_flow_feed=None):
+    def log_decision(self, market, indicators, signal, chainlink_feed, kraken_window_ts, kraken_ref_open, order_flow_feed=None, kalshi_feed=None):
         if not self.conn:
             return
         market_id = market["id"]
@@ -359,6 +366,18 @@ class ShadowLogger:
                 row["ofi_n_trades_30s"] = ofi30.get("n_trades")
             except Exception as e:
                 logger.debug(f"OFI capture error [{asset}]: {e}")
+
+        # Lean de Kalshi — ver kalshi_feed.py. Shadow-only, candidato a 4ta
+        # confirmación, no cuenta para nada en vivo todavía.
+        if kalshi_feed is not None:
+            try:
+                ksnap = kalshi_feed.get_snapshot(asset)
+                row["kalshi_yes_ask"] = _safe(ksnap.get("yes_ask"))
+                row["kalshi_lean"] = _safe(ksnap.get("lean"))
+                row["kalshi_seconds_left"] = _safe(ksnap.get("seconds_left"))
+                row["kalshi_feed_connected"] = ksnap.get("feed_connected")
+            except Exception as e:
+                logger.debug(f"Kalshi capture error [{asset}]: {e}")
 
         cols = ", ".join(row.keys())
         placeholders = ", ".join(f"%({k})s" for k in row.keys())
