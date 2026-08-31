@@ -69,6 +69,17 @@ logger = logging.getLogger(__name__)
 # vez de pausar toda la banda; 0.93-0.95 también mostró debilidad
 # reciente pero con muestra más chica (n=126) y sin una frontera natural
 # para recortarlo limpio — queda para seguir vigilando, no se tocó.
+# CHEAP_MIN agregado (31-ago-2026): cheap nunca tuvo piso de precio, solo
+# techo — cualquier precio de 0 a 0.55 calificaba. Revisando paper_v2 por
+# rango de precio en la última semana (n=451): el tramo 0.00-0.20 es el
+# ÚNICO con avg_pnl NEGATIVO (-$3.93/trade, 10.0% acierto, n=20) — todos
+# los demás (0.20-0.35: +$3.65/n=47, 0.35-0.45: +$4.52/n=59, 0.45-0.55:
+# +$6.81/n=325, la gran mayoría del volumen) son rentables pese a acierto
+# más bajo que el resto de la banda, porque el pago compensa. Con precio
+# tan bajo el mercado ya está prácticamente seguro del lado contrario —
+# apostarle en contra ahí no tiene edge real, solo parece "barato". Se
+# corta ese tramo específico, se deja el resto de la banda intacto.
+CHEAP_MIN = 0.20
 CHEAP_MAX = 0.55
 FAVORITE_MIN = 0.80
 FAVORITE_MAX = 0.97
@@ -214,7 +225,14 @@ def generate_signal_v2(chainlink_snapshot: dict, market: dict) -> dict:
     # cualquier banda (ver STAKE_MULTIPLIER_PER_CONFIRMATION arriba).
     confirmations, confirm_detail = _count_confirmations(chainlink_snapshot, side)
 
-    if price < CHEAP_MAX:
+    if price < CHEAP_MIN:
+        result["blocked"] = True
+        result["block_reason"] = (
+            f"Price {price:.2f} below CHEAP_MIN ({CHEAP_MIN}) — tramo con avg_pnl "
+            f"negativo en datos reales, ver comentario junto a CHEAP_MIN"
+        )
+        return result
+    elif price < CHEAP_MAX:
         band = "cheap"
         rel_delta = abs(diff / twap60_open) if twap60_open else 0
         if rel_delta < MIN_REL_DELTA_CHEAP:
