@@ -108,10 +108,16 @@ TRADE_FAVORITE_BAND = True
 # ESTA zona específica (/api/shadow-confirmation): 0 confirmaciones pierde
 # (-$73.58, 106 trades), 2+ gana con margen real (+$28.84 a 69.5% con 2,
 # +$44.36 a 78.6% con 3 — el mejor retorno por trade de todo el dataset).
-# MID_ZONE_MIN_CONFIRMATIONS exige al menos 2 de 3.
+# MID_ZONE_MIN_CONFIRMATIONS subido de 2 a 3 (31-ago-2026): revisando
+# paper_v2 completo dentro de lo que YA pasaba el filtro de 2+, la
+# diferencia entre 2 y 3 es enorme — 2 confirmaciones: 68.6% acierto,
+# +$0.22/trade (n=376); 3/3: 84.9% acierto, +$2.86/trade (n=205), casi
+# 13x más margen por trade. Corta el volumen a poco más de la mitad,
+# decisión explícita del usuario para reducir la varianza de "una
+# pérdida borra muchas ganadas" — prioriza calidad sobre volumen acá.
 MID_ZONE_MIN = 0.55
 MID_ZONE_MAX = 0.75
-MID_ZONE_MIN_CONFIRMATIONS = 2
+MID_ZONE_MIN_CONFIRMATIONS = 3
 TRADE_MID_ZONE = True
 
 # Sizing por confirmaciones (19-ago-2026): get_confirmation_report() mostró
