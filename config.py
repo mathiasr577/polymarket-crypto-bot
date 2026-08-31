@@ -122,6 +122,22 @@ LIVE_V2_ENABLED = os.environ.get("LIVE_V2_ENABLED", "false").lower() == "true"
 # para sobrevivir como taker. Se pausa de plata real otra vez — shadow y
 # paper siguen corriendo para investigar maker-only (post-only, sin fee
 # de taker, con posible rebate) antes de volver a poner capital real acá.
+#
+# 31-ago-2026 (cierre de la línea de "alpha informacional" con las 4
+# señales actuales — magnitud TWAP60, lead, OFI, presión): probado con
+# regresión logística (offset=logit(precio), 1 split walk-forward) Y con
+# GBDT (mismas features + precio/segundos-restantes/asset, 3 folds
+# temporales walk-forward, n=1857 agregado out-of-sample) — en AMBOS
+# casos el Brier score empata con el precio crudo de Polymarket, y el
+# ranking por quintiles de edge predicho sale desordenado (el quintil
+# "mejor predicho" no es el de mejor resultado real, ni con el modelo no
+# lineal aparece la interacción tipo "OFI importa solo si lead cruza tal
+# umbral"). Con dos modelos de distinta familia y folds distintos dando
+# el mismo resultado negativo, se cierra esta línea (no se seguirá
+# iterando con más modelos sobre las mismas 4 features — eso sería
+# data snooping) hasta que haya información genuinamente nueva (ej.
+# Kalshi validado, o la descomposición de ejecución de los 250ms de
+# taker delay que se investiga a continuación).
 LIVE_V2_DISABLED_BANDS = set(
     b.strip() for b in os.environ.get("LIVE_V2_DISABLED_BANDS", "favorite").split(",") if b.strip()
 )
