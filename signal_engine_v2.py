@@ -79,6 +79,17 @@ logger = logging.getLogger(__name__)
 # tan bajo el mercado ya está prácticamente seguro del lado contrario —
 # apostarle en contra ahí no tiene edge real, solo parece "barato". Se
 # corta ese tramo específico, se deja el resto de la banda intacto.
+# CHEAP_MIN_CONFIRMATIONS agregado (31-ago-2026): cheap nunca exigió
+# confirmaciones (lead/ofi/pressure de acuerdo con TWAP60), solo el
+# filtro de magnitud MIN_REL_DELTA_CHEAP. Revisando paper_v2 completo por
+# nivel de confirmación: 0 confirmaciones pierde plata (-$0.78/trade,
+# 32.4% acierto, n=34), 1 es apenas positivo ($0.95/trade, 43.2%, n=280,
+# el grueso del volumen), 2 ya es bueno ($5.16/trade, 76.4%, n=191), 3 es
+# excelente ($12.41/trade, 98.8% acierto, n=258). Gradiente limpio y
+# monótono — mucho más fuerte que el filtro de precio de arriba. Se exige
+# 2+ (igual que mid_confirmed) — corta el tramo de 0-1 confirmaciones que
+# diluye el promedio con trades de baja convicción.
+CHEAP_MIN_CONFIRMATIONS = 2
 CHEAP_MIN = 0.20
 CHEAP_MAX = 0.55
 FAVORITE_MIN = 0.80
@@ -240,6 +251,13 @@ def generate_signal_v2(chainlink_snapshot: dict, market: dict) -> dict:
             result["block_reason"] = (
                 f"TWAP60 move too small in cheap band: rel_delta={rel_delta:.6f} "
                 f"< {MIN_REL_DELTA_CHEAP} (ver /api/shadow-filtered-sim)"
+            )
+            return result
+        if confirmations < CHEAP_MIN_CONFIRMATIONS:
+            result["blocked"] = True
+            result["block_reason"] = (
+                f"Cheap band necesita {CHEAP_MIN_CONFIRMATIONS}+ confirmaciones, "
+                f"tiene {confirmations} (ver comentario junto a CHEAP_MIN_CONFIRMATIONS)"
             )
             return result
     elif FAVORITE_MIN <= price < FAVORITE_MAX:
