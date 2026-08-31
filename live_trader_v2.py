@@ -73,6 +73,16 @@ MIN_TRADE_USD = 2.0
 # aplicado, decisión explícita del usuario, no calculado.
 LIVE_MAX_STAKE_USD = 11.0
 
+# 31-ago-2026 (sugerido por la otra IA): hasta acá, tener 2 posiciones
+# abiertas a la vez (max_open=2, ver can_trade) se trataba como 2 riesgos
+# independientes — pero si son BTC y ETH del mismo momento, casi siempre se
+# mueven juntos, así que en la práctica es UNA sola apuesta macro con el
+# doble de tamaño, no dos apuestas separadas. MAX_CONCURRENT_RISK_USD pone
+# un techo en DÓLARES a la exposición combinada de todas las posiciones
+# abiertas a la vez — deliberadamente por debajo de 2x LIVE_MAX_STAKE_USD
+# ($22) para que nunca se puedan tener 2 posiciones al tope simultáneas.
+MAX_CONCURRENT_RISK_USD = 15.0
+
 # Fase temprana de plata real (20-ago-2026, revisión pre-lanzamiento con la
 # otra IA): el primer día no valida el modelo — valida que la EJECUCIÓN real
 # (fills, fees, slippage, latencia) se comporte como el backtest/paper
@@ -95,6 +105,17 @@ EARLY_PHASE_MAX_LOSS_USD = 10.0
 
 # Caché corta del balance real para no golpear la API en cada tick.
 BALANCE_CACHE_SEC = 10
+
+# 31-ago-2026 (sugerido por la otra IA): PnL acumulado de la ESTRATEGIA,
+# independiente de depósitos — a diferencia del balance real (que sube con
+# cualquier depósito, no solo con trading), esto suma solo el pnl de cada
+# trade resuelto, así que un depósito no puede "resetear" el drawdown real.
+# Con esto se calculó el pico histórico real: +$61.08 el 26-ago, drawdown
+# actual desde ahí -$205.39 (31-ago). Por ahora SOLO se muestra en el
+# dashboard — no hay freno automático todavía, decisión explícita del
+# usuario (quiere ver el número evolucionar unos días antes de fijar un
+# límite duro que pararía el bot ENTERO, no solo por el día).
+STRATEGY_PNL_CACHE_SEC = 30
 
 # Slippage del LIMIT order (ver order_executor.py) por banda — antes era un
 # 3% fijo para cualquier precio. En la banda favorita (precio ~0.75-0.97) el
@@ -236,6 +257,8 @@ class LiveTraderV2:
         self._drawdown_paused = False
         self._cached_balance = None
         self._cached_balance_ts = 0.0
+        self._strategy_pnl_cache = None
+        self._strategy_pnl_cache_ts = 0.0
         self.conn = None
         self._init_client()
         self._connect_db()
@@ -254,6 +277,50 @@ class LiveTraderV2:
             self._cached_balance = balance
             self._cached_balance_ts = now
         return balance
+
+    def _get_strategy_pnl_stats(self) -> dict:
+        """PnL acumulado real de la estrategia y drawdown desde el pico
+        histórico — ver STRATEGY_PNL_CACHE_SEC arriba. Recalcula desde
+        TODOS los trades resueltos (no solo self.results, que es
+        solo-hoy) cada vez que expira la caché; con 603+ filas es barato."""
+        now = time.time()
+        with self._lock:
+            if self._strategy_pnl_cache is not None and (now - self._strategy_pnl_cache_ts) < STRATEGY_PNL_CACHE_SEC:
+                return self._strategy_pnl_cache
+
+        result = {"cumulative_pnl": None, "historical_peak": None, "peak_at": None, "drawdown_from_peak": None}
+        if self.conn:
+            try:
+                with self.conn.cursor() as cur:
+                    cur.execute("""
+                        SELECT size, price, win, resolved_at FROM live_trades_v2
+                        WHERE resolved_at IS NOT NULL AND size IS NOT NULL AND price IS NOT NULL
+                        ORDER BY resolved_at ASC
+                    """)
+                    rows = cur.fetchall()
+                cum = 0.0
+                peak = 0.0
+                peak_at = None
+                for size, price, win, resolved_at in rows:
+                    fee = size * 0.07 * (1.0 - price)
+                    pnl = (size * ((1.0 - price) / price) - fee) if win else (-size - fee)
+                    cum += pnl
+                    if cum > peak:
+                        peak = cum
+                        peak_at = resolved_at
+                result = {
+                    "cumulative_pnl": round(cum, 2),
+                    "historical_peak": round(peak, 2),
+                    "peak_at": peak_at.isoformat() if peak_at else None,
+                    "drawdown_from_peak": round(peak - cum, 2),
+                }
+            except Exception as e:
+                logger.error(f"LiveTraderV2 strategy pnl calc error: {e}")
+
+        with self._lock:
+            self._strategy_pnl_cache = result
+            self._strategy_pnl_cache_ts = now
+        return result
 
     def _init_client(self):
         try:
@@ -441,6 +508,11 @@ class LiveTraderV2:
             if len(self.open_positions) >= max_open:
                 return False
 
+            # Risk budget conjunto — ver MAX_CONCURRENT_RISK_USD arriba.
+            open_risk_usd = sum(t.get("size", 0) or 0 for t in self.open_positions.values())
+            if open_risk_usd >= MAX_CONCURRENT_RISK_USD:
+                return False
+
             day_start = self.day_start_balance
             total_trades = self.total_trades
             was_paused = self._drawdown_paused
@@ -520,7 +592,19 @@ class LiveTraderV2:
         # le pone un techo absoluto propio (LIVE_MAX_STAKE_USD) en vez de
         # dejar que el multiplicador decida solo — 2.5x sobre el techo base
         # de $5 daría $12.50, más de lo que se quiere arriesgar por trade.
-        return round(min(LIVE_MAX_STAKE_USD, max(MIN_TRADE_USD, base * stake_multiplier)), 2)
+        sized = min(LIVE_MAX_STAKE_USD, max(MIN_TRADE_USD, base * stake_multiplier))
+
+        # Risk budget conjunto BTC/ETH (31-ago-2026) — ver
+        # MAX_CONCURRENT_RISK_USD. Si ya hay otra posición abierta (típico:
+        # BTC y ETH del mismo momento, correlacionados), recorta esta al
+        # espacio que quede del presupuesto combinado en vez de tratarla
+        # como un riesgo totalmente independiente.
+        with self._lock:
+            open_risk_usd = sum(t.get("size", 0) or 0 for t in self.open_positions.values())
+        remaining = MAX_CONCURRENT_RISK_USD - open_risk_usd
+        sized = min(sized, max(MIN_TRADE_USD, remaining))
+
+        return round(sized, 2)
 
     def get_balance(self) -> float:
         try:
@@ -830,6 +914,7 @@ class LiveTraderV2:
                     "trades_until_normal_sizing": max(0, EARLY_PHASE_FLAT_TRADES - self.total_trades),
                     "max_loss_usd": EARLY_PHASE_MAX_LOSS_USD,
                 },
+                "strategy_pnl": self._get_strategy_pnl_stats(),
             }
 
 
