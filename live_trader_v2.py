@@ -56,7 +56,12 @@ MAX_LIVE_TRADES = 1_000_000  # sin techo real de trades — corre indefinido
 # degradación persistente como la de favorite el 29-ago) — es riesgo de
 # cola inherente a la estrategia. Se baja el tamaño para que una ventana
 # así duela menos la próxima vez, no para "arreglar" la señal.
-TRADE_SIZE = 6.0
+#
+# Bajado de $6 a $5 (31-ago-2026), a pedido del usuario — el cash bajó
+# (balance real ~$210 hoy, contra ~$289 de arranque de este día) y con
+# favorite pausada de plata real, MAX_CONCURRENT_RISK_USD ($15) también
+# tiene más margen relativo con un tamaño base más chico.
+TRADE_SIZE = 5.0
 MAX_NO_FILLS_HISTORY = 20
 
 # Mismo esquema de sizing proporcional al balance que ya validamos en v1
@@ -71,7 +76,9 @@ MIN_TRADE_USD = 2.0
 # de TRADE_SIZE (el techo base sin multiplicador) — este es el techo de lo
 # que se puede llegar a arriesgar en UN trade con el multiplicador
 # aplicado, decisión explícita del usuario, no calculado.
-LIVE_MAX_STAKE_USD = 11.0
+#
+# Bajado de $11 a $10 (31-ago-2026) junto con TRADE_SIZE — mismo motivo.
+LIVE_MAX_STAKE_USD = 10.0
 
 # 31-ago-2026 (sugerido por la otra IA): hasta acá, tener 2 posiciones
 # abiertas a la vez (max_open=2, ver can_trade) se trataba como 2 riesgos
