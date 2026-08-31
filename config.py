@@ -101,6 +101,27 @@ LIVE_V2_ENABLED = os.environ.get("LIVE_V2_ENABLED", "false").lower() == "true"
 # FAVORITE_MIN de 0.75 a 0.80 en signal_engine_v2.py para excluir el tramo
 # roto de raíz (en vez de dejar la banda entera parada sin arreglar nada),
 # y se reactiva favorite en plata real ya recortada.
+#
+# 31-ago-2026 (pausa otra vez, con evidencia distinta y más fuerte que
+# antes — consultado con una IA externa, verificado cada punto antes de
+# actuar): tres señales independientes apuntan al mismo lado.
+#   1) Plata real: -$23.41 en 432 trades (88.4% acierto, margen tan fino
+#      que ni ganando casi siempre alcanza a compensar).
+#   2) Se probó un EV-gate (logit(precio_mercado) + señales de lead/OFI/
+#      presión/magnitud, walk-forward real, testeado SOLO contra los
+#      últimos 3 días nunca vistos por el modelo) — no le ganó al precio
+#      crudo de Polymarket out-of-sample (Brier 0.0880 vs 0.0882,
+#      prácticamente idéntico). El mercado ya está bien calibrado ahí.
+#   3) Gross/net edge por bucket de precio, separando reciente de
+#      histórico con la fórmula de fee CORRECTA: histórico +2.44% neto
+#      por dólar apostado (real), reciente (últimos 5 días) cayó a
+#      +0.41% — technically positivo pero tan fino que fricciones reales
+#      de ejecución (Polymarket confirma un "taker delay" de 250ms en
+#      estos mercados exactos, itode:true verificado) pueden borrarlo.
+# Conclusión: no es "no hay edge", es que el que queda es demasiado fino
+# para sobrevivir como taker. Se pausa de plata real otra vez — shadow y
+# paper siguen corriendo para investigar maker-only (post-only, sin fee
+# de taker, con posible rebate) antes de volver a poner capital real acá.
 LIVE_V2_DISABLED_BANDS = set(
-    b.strip() for b in os.environ.get("LIVE_V2_DISABLED_BANDS", "").split(",") if b.strip()
+    b.strip() for b in os.environ.get("LIVE_V2_DISABLED_BANDS", "favorite").split(",") if b.strip()
 )
