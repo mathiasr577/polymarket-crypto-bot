@@ -825,6 +825,13 @@ class LiveTraderV2:
         )
 
     def get_stats(self) -> dict:
+        # Fuera del with self._lock de abajo a propósito — self._lock NO es
+        # reentrante (threading.Lock), y _get_strategy_pnl_stats() toma el
+        # mismo lock para su caché. Llamarlo estando ya adentro del with
+        # de abajo era un deadlock real (encontrado en producción a los
+        # pocos minutos de desplegarlo — /api/stats empezó a devolver
+        # respuestas vacías).
+        strategy_pnl = self._get_strategy_pnl_stats()
         with self._lock:
             wins = [r for r in self.results if r["win"]]
             losses = [r for r in self.results if not r["win"]]
@@ -914,7 +921,7 @@ class LiveTraderV2:
                     "trades_until_normal_sizing": max(0, EARLY_PHASE_FLAT_TRADES - self.total_trades),
                     "max_loss_usd": EARLY_PHASE_MAX_LOSS_USD,
                 },
-                "strategy_pnl": self._get_strategy_pnl_stats(),
+                "strategy_pnl": strategy_pnl,
             }
 
 
