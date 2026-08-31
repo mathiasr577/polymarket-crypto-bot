@@ -24,6 +24,7 @@ arriesgar plata real con un modelo nuevo.
 """
 import json
 import logging
+import os
 import threading
 import time
 import psycopg2
@@ -106,6 +107,15 @@ BALANCE_CACHE_SEC = 10
 DEFAULT_SLIPPAGE_PCT = 0.03
 TIGHT_SLIPPAGE_PCT = 0.015
 _TIGHT_SLIPPAGE_BANDS = ("favorite", "mid_confirmed")
+
+# 31-ago-2026: flag para probar place_order_fak() (ver order_executor.py)
+# en vez del flujo viejo LIMIT+espera 55s+cancel ambiguo. Arranca en False
+# a propósito — la forma exacta de la respuesta de un FAK real todavía no
+# se verificó contra producción (a diferencia de get_order, que sí se
+# verificó contra 9 respuestas reales antes de confiar en él). Cuando se
+# prenda, mirar los primeros fills reales en los logs ("🔍 FAK raw
+# response") antes de asumir que se están interpretando bien.
+USE_FAK_ORDERS = os.environ.get("USE_FAK_ORDERS", "false").lower() == "true"
 
 ET_OFFSET = timedelta(hours=-4)  # mismo offset fijo que usa el resto del código
 
@@ -555,22 +565,32 @@ class LiveTraderV2:
         try:
             t0 = time.time()
 
-            from order_executor import place_order
-
             alt_token_id = None
             if tokens:
                 alt_side = "DOWN" if side == "UP" else "UP"
                 alt_token_id = tokens.get(alt_side)
 
             slippage_pct = TIGHT_SLIPPAGE_PCT if band in _TIGHT_SLIPPAGE_BANDS else DEFAULT_SLIPPAGE_PCT
-            resp = place_order(
-                token_id=token_id,
-                price=round(price, 2),
-                size=intended_size,
-                side="BUY",
-                alt_token_id=alt_token_id,
-                max_slippage_pct=slippage_pct,
-            )
+
+            if USE_FAK_ORDERS:
+                from order_executor import place_order_fak
+                resp = place_order_fak(
+                    token_id=token_id,
+                    price=round(price, 2),
+                    size=intended_size,
+                    side="BUY",
+                    max_slippage_pct=slippage_pct,
+                )
+            else:
+                from order_executor import place_order
+                resp = place_order(
+                    token_id=token_id,
+                    price=round(price, 2),
+                    size=intended_size,
+                    side="BUY",
+                    alt_token_id=alt_token_id,
+                    max_slippage_pct=slippage_pct,
+                )
 
             latency = time.time() - t0
 

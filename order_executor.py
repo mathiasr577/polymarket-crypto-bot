@@ -1,8 +1,19 @@
 """
 Real order executor — only used when PAPER_TRADING=false
-Uses LIMIT order with a configurable slippage tolerance (default 3%,
-see place_order's max_slippage_pct).
-Leaves order open for 55s — Polymarket cancels automatically at market close.
+
+31-ago-2026 (sugerido por la otra IA, verificado contra el código fuente
+real de py-clob-client-v2 antes de implementar — nunca contra la
+respuesta de un FAK real todavía, ver USE_FAK_ORDERS abajo): agregado
+place_order_fak(), que reemplaza el flujo viejo (orden LIMIT → esperar
+55s → cancel_order() → resolver ambigüedad con get_order()) por una
+orden de mercado FAK (Fill-And-Kill): se llena lo que hay disponible
+hasta el precio tope al instante, cancela el resto automáticamente. Sin
+espera de 55s, sin cancelación ambigua — ese problema entero deja de
+existir porque el CLOB resuelve todo en una sola llamada.
+
+place_order() (LIMIT, con la espera de 55s) se deja intacta como
+fallback — ver USE_FAK_ORDERS en live_trader_v2.py para el flag que
+decide cuál se usa.
 """
 import logging
 import time
@@ -171,6 +182,69 @@ def place_order(token_id: str, price: float, size: float, side: str = "BUY",
 
     except Exception as e:
         logger.warning(f"Limit order failed: {e} — skipping")
+        return {"error": str(e)}
+
+
+def place_order_fak(token_id: str, price: float, size: float, side: str = "BUY",
+                     max_slippage_pct: float = 0.03) -> dict:
+    """
+    Orden de mercado FAK (Fill-And-Kill): se llena lo que haya disponible
+    hasta price_cap al instante, el resto se cancela automáticamente —
+    sin la espera de 55s ni la cancelación ambigua de place_order().
+    size = dólares a gastar (igual semántica que place_order).
+
+    price_cap se pasa explícito (no se deja en 0/"auto-calculado") porque
+    la doc de MarketOrderArgsV2 no dice con certeza qué hace el
+    auto-cálculo — usamos el mismo techo de slippage que ya veníamos
+    calculando a mano, así el comportamiento de riesgo no cambia, solo
+    cambia CÓMO se ejecuta.
+
+    31-ago-2026: implementado y verificado contra el código fuente de
+    py-clob-client-v2 (create_market_order/post_order comparten el mismo
+    endpoint y el mismo parser de respuesta que las órdenes LIMIT), pero
+    todavía SIN una respuesta real de producción de un FAK para confirmar
+    la forma exacta del payload (a diferencia del fix de get_order, que sí
+    se verificó contra 9 respuestas reales antes de confiar en él) — por
+    eso el logging de la respuesta cruda es más agresivo acá, para poder
+    confirmarlo con los primeros fills reales antes de asumir que
+    _extract_fill_info() la interpreta bien.
+    """
+    client = get_client()
+    if not client:
+        return {"error": "No CLOB client"}
+
+    if price > MAX_PRICE or price < MIN_PRICE:
+        logger.warning(f"Scanner price {price:.2f} out of range — skipping")
+        return {"error": f"scanner price out of range: {price:.2f}"}
+
+    price_cap = round(min(price * (1 + max_slippage_pct), MAX_PRICE), 2)
+
+    try:
+        from py_clob_client_v2 import MarketOrderArgs, OrderType, Side
+        logger.info(
+            f"FAK order: BUY ${size:.2f} @ price_cap {price_cap:.2f} "
+            f"(scanner={price:.2f}, token={token_id[:20]}...)"
+        )
+
+        order_args = MarketOrderArgs(
+            token_id=token_id,
+            amount=size,
+            side=Side.BUY if side == "BUY" else Side.SELL,
+            price=price_cap,
+            order_type=OrderType.FAK,
+        )
+        resp = client.create_and_post_market_order(
+            order_args=order_args,
+            order_type=OrderType.FAK,
+        )
+        # Log agresivo a propósito (ver docstring) — necesitamos varias
+        # respuestas reales antes de confiar en que _extract_fill_info()
+        # la interpreta igual que a las órdenes LIMIT.
+        logger.info(f"🔍 FAK raw response (verificando forma real): {resp}")
+        return resp
+
+    except Exception as e:
+        logger.warning(f"FAK order failed: {e} — skipping")
         return {"error": str(e)}
 
 
