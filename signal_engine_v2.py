@@ -303,7 +303,19 @@ def generate_signal_v2(chainlink_snapshot: dict, market: dict) -> dict:
     result["side"] = side
     result["confidence"] = "HIGH" if band in ("cheap", "mid_confirmed") else "MEDIUM"
     result["confirmations"] = confirmations
-    result["stake_multiplier"] = round(1 + STAKE_MULTIPLIER_PER_CONFIRMATION * confirmations, 2)
+    # 31-ago-2026 (sugerido por la otra IA, verificado contra nuestros propios
+    # datos antes de aplicarlo): en favorite las confirmaciones NO predicen
+    # el resultado de forma limpia (92.3%/89.8%/92.4% de acierto con 1/2/3,
+    # ni siquiera monótono — 2 peor que 1), a diferencia de cheap y
+    # mid_confirmed donde el gradiente es limpio y fuerte. Escalar el tamaño
+    # ahí según una variable que no aporta información solo agrega varianza
+    # sin backing real — justo lo contrario de lo que se necesita en una
+    # banda de margen fino. Se fuerza 1.0x en favorite, se deja el
+    # multiplicador normal para el resto de las bandas.
+    if band == "favorite":
+        result["stake_multiplier"] = 1.0
+    else:
+        result["stake_multiplier"] = round(1 + STAKE_MULTIPLIER_PER_CONFIRMATION * confirmations, 2)
     reason = (
         f"TWAP60 delta={diff:+.4f} -> {side}, price={price:.2f} band={band} "
         f"confirmations={confirmations} ({confirm_detail}) stake_x={result['stake_multiplier']}"

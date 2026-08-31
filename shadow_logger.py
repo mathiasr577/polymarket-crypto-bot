@@ -1,4 +1,21 @@
 """
+FEE MODEL corregido (31-ago-2026, sugerido por la otra IA, verificado
+contra https://help.polymarket.com/en/articles/13364478-trading-fees
+antes de tocar nada): el fee real de Polymarket para crypto es
+`fee = shares * 0.07 * price * (1-price)` — cobrado SOLO al taker, NUNCA
+al maker, y depende del precio (máximo en 0.50, casi cero en los
+extremos). Todas las funciones de este archivo usaban antes un modelo
+sintético distinto (`stake*((1-price)/price)*(1-fee)` en victorias, CERO
+fee en derrotas) que no representa el fee real. Verificado el impacto
+real recalculando los 603 trades de plata real con la fórmula correcta:
+-$141.57 (viejo) -> -$144.31 (correcto) — el error de fórmula NO explica
+las pérdidas, el panorama real es levemente peor, no mejor. Se corrige
+igual para que cualquier análisis futuro (EV, breakeven, backtests) parta
+de la base correcta. En términos de costo (cost = shares*price), el fee
+real equivale a `cost * 0.07 * (1-price)`, cobrado en la ENTRADA
+independiente de si gana o pierde — por eso ahora también se descuenta
+en las derrotas, cosa que antes no pasaba.
+
 Shadow-mode logger — Fase 1 (validación de ingeniería, 20-50 mercados).
 
 No toca NINGUNA decisión de trading (ni paper ni live). Por cada mercado que
@@ -580,7 +597,7 @@ class ShadowLogger:
             return {}
 
         def breakeven(price, fee=0.07):
-            return price / (price + (1 - fee) * (1 - price))
+            return price * (1 + fee * (1 - price))
 
         bands = [(0.0, 0.45), (0.45, 0.55), (0.55, 0.65), (0.65, 0.75), (0.75, 0.85), (0.85, 1.01)]
         band_reports = []
@@ -774,7 +791,7 @@ class ShadowLogger:
                 band = "unrestricted"
 
             win = side == row["actual_outcome"]
-            pnl = stake * ((1 - price) / price) * (1 - fee) if win else -stake
+            pnl = stake * ((1 - price) / price - fee * (1 - price)) if win else -stake * (1 + fee * (1 - price))
 
             b = bands.setdefault(band, {"n": 0, "wins": 0, "pnl": 0.0})
             b["n"] += 1
@@ -1032,7 +1049,7 @@ class ShadowLogger:
                     continue
 
                 win = side == row["actual_outcome"]
-                pnl = stake * ((1 - price) / price) * (1 - fee) if win else -stake
+                pnl = stake * ((1 - price) / price - fee * (1 - price)) if win else -stake * (1 + fee * (1 - price))
                 b = bands[band]
                 b["n"] += 1
                 b["pnl"] += pnl
@@ -1233,7 +1250,7 @@ class ShadowLogger:
             return {}
 
         def breakeven(price):
-            return price / (price + (1 - fee) * (1 - price))
+            return price * (1 + fee * (1 - price))
 
         now = datetime.now(timezone.utc)
         cutoff = now - timedelta(days=days_recent)
@@ -1252,7 +1269,7 @@ class ShadowLogger:
                 if price is None or not (lo <= price < hi):
                     continue
                 win = side == row["actual_outcome"]
-                pnl = stake * ((1 - price) / price) * (1 - fee) if win else -stake
+                pnl = stake * ((1 - price) / price - fee * (1 - price)) if win else -stake * (1 + fee * (1 - price))
                 bucket = "recent" if row["market_open_timestamp"] >= cutoff else "historical"
                 b = buckets[bucket]
                 b["n"] += 1
@@ -1351,7 +1368,7 @@ class ShadowLogger:
                     if count < 2:
                         continue
                 win = side == row["actual_outcome"]
-                pnl = stake * ((1 - price) / price) * (1 - fee) if win else -stake
+                pnl = stake * ((1 - price) / price - fee * (1 - price)) if win else -stake * (1 + fee * (1 - price))
                 bucket = "recent" if row["market_open_timestamp"] >= cutoff else "historical"
                 b = buckets[bucket]
                 b["n"] += 1
@@ -1397,7 +1414,7 @@ class ShadowLogger:
             return {}
 
         def breakeven(price):
-            return price / (price + (1 - fee) * (1 - price))
+            return price * (1 + fee * (1 - price))
 
         sub_bands = [(0.00, 0.05), (0.05, 0.15), (0.15, 0.25), (0.25, 0.35), (0.35, 0.45), (0.45, 0.55)]
         report = []
@@ -1416,7 +1433,7 @@ class ShadowLogger:
                 if price is None or not (lo <= price < hi):
                     continue
                 win = side == row["actual_outcome"]
-                pnl += stake * ((1 - price) / price) * (1 - fee) if win else -stake
+                pnl += stake * ((1 - price) / price - fee * (1 - price)) if win else -stake * (1 + fee * (1 - price))
                 n += 1
                 if win:
                     wins += 1
@@ -1433,7 +1450,7 @@ class ShadowLogger:
                 "total_pnl": round(pnl, 2),
                 "avg_pnl_per_trade": round(pnl / n, 4),
                 "risk_per_trade": stake,
-                "max_reward_per_trade_approx": round(stake * (1 - mid) / mid * (1 - fee), 4),
+                "max_reward_per_trade_approx": round((stake * (1 - mid) / mid - stake * fee * (1 - mid)), 4),
             })
         return {"sub_bands": report}
 
@@ -1463,7 +1480,7 @@ class ShadowLogger:
             return {}
 
         def breakeven(price):
-            return price / (price + (1 - fee) * (1 - price))
+            return price * (1 + fee * (1 - price))
 
         sub_bands = [(0.85, 0.90), (0.90, 0.93), (0.93, 0.95), (0.95, 0.97), (0.97, 0.99), (0.99, 1.0)]
         report = []
@@ -1479,7 +1496,7 @@ class ShadowLogger:
                 if price is None or not (lo <= price < hi):
                     continue
                 win = side == row["actual_outcome"]
-                pnl += stake * ((1 - price) / price) * (1 - fee) if win else -stake
+                pnl += stake * ((1 - price) / price - fee * (1 - price)) if win else -stake * (1 + fee * (1 - price))
                 n += 1
                 if win:
                     wins += 1
@@ -1496,7 +1513,7 @@ class ShadowLogger:
                 "total_pnl": round(pnl, 2),
                 "avg_pnl_per_trade": round(pnl / n, 4),
                 "risk_per_trade": stake,
-                "max_reward_per_trade_approx": round(stake * (1 - mid) / mid * (1 - fee), 4),
+                "max_reward_per_trade_approx": round((stake * (1 - mid) / mid - stake * fee * (1 - mid)), 4),
             })
         return {"sub_bands": report}
 
@@ -1543,7 +1560,7 @@ class ShadowLogger:
                 continue
 
             win = side == row["actual_outcome"]
-            pnl = stake * ((1 - price) / price) * (1 - fee) if win else -stake
+            pnl = stake * ((1 - price) / price - fee * (1 - price)) if win else -stake * (1 + fee * (1 - price))
             h = row["decision_timestamp"].hour
             hours[h]["n"] += 1
             hours[h]["pnl"] += pnl
@@ -1601,7 +1618,7 @@ class ShadowLogger:
                 if price is None or not (lo <= price < hi):
                     continue
                 win = side == row["actual_outcome"]
-                pnl += stake * ((1 - price) / price) * (1 - fee) if win else -stake
+                pnl += stake * ((1 - price) / price - fee * (1 - price)) if win else -stake * (1 + fee * (1 - price))
                 n += 1
                 if win:
                     wins += 1
@@ -1673,7 +1690,7 @@ class ShadowLogger:
                 continue
 
             win = side == row["actual_outcome"]
-            pnl = stake * ((1 - price) / price) * (1 - fee) if win else -stake
+            pnl = stake * ((1 - price) / price - fee * (1 - price)) if win else -stake * (1 + fee * (1 - price))
             dow = row["decision_timestamp"].weekday()  # 0=Monday .. 6=Sunday
 
             d = days[dow]
@@ -1918,7 +1935,7 @@ class ShadowLogger:
             return {}
 
         def breakeven(price):
-            return price / (price + (1 - fee) * (1 - price))
+            return price * (1 + fee * (1 - price))
 
         # count -> {"excluded_zone": {...}, "already_traded_zone": {...}}
         by_count = {c: {"excluded": {"n": 0, "wins": 0, "pnl": 0.0}, "traded": {"n": 0, "wins": 0, "pnl": 0.0}} for c in range(4)}
@@ -1946,7 +1963,7 @@ class ShadowLogger:
 
             zone = "excluded" if 0.55 <= price < 0.75 else "traded"
             win = twap_side == row["actual_outcome"]
-            pnl = stake * ((1 - price) / price) * (1 - fee) if win else -stake
+            pnl = stake * ((1 - price) / price - fee * (1 - price)) if win else -stake * (1 + fee * (1 - price))
 
             b = by_count[count][zone]
             b["n"] += 1
@@ -2052,7 +2069,7 @@ class ShadowLogger:
                 expected = sorted(hist)[len(hist) // 2]  # mediana de lo visto HASTA ahora
                 deficit = expected - price  # >0 = más barato de lo típico para este bucket
                 win = side == row["actual_outcome"]
-                pnl = stake * ((1 - price) / price) * (1 - fee) if win else -stake
+                pnl = stake * ((1 - price) / price - fee * (1 - price)) if win else -stake * (1 + fee * (1 - price))
                 cases.append({
                     "asset": row["asset"], "mag_bin": mb, "price": round(price, 4),
                     "expected": round(expected, 4), "deficit": round(deficit, 4),
@@ -2185,7 +2202,7 @@ class ShadowLogger:
                 parts.append("pressure" + ("✓" if agree else "✗"))
 
             win = side == row["actual_outcome"]
-            pnl = stake * ((1 - price) / price) * (1 - fee) if win else -stake
+            pnl = stake * ((1 - price) / price - fee * (1 - price)) if win else -stake * (1 + fee * (1 - price))
             b = by_count[count]
             b["n"] += 1
             b["pnl"] += pnl
@@ -2277,7 +2294,7 @@ class ShadowLogger:
             pnl = 0.0
             for price, win, count in cases:
                 stake = size_fn(count)
-                pnl += stake * ((1 - price) / price) * (1 - fee) if win else -stake
+                pnl += stake * ((1 - price) / price - fee * (1 - price)) if win else -stake * (1 + fee * (1 - price))
                 n += 1
             return {"n": n, "total_pnl": round(pnl, 2), "avg_pnl_per_trade": round(pnl / n, 3) if n else None}
 

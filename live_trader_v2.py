@@ -684,10 +684,20 @@ class LiveTraderV2:
             win = (side == outcome)
             entry_price = trade["price"]
             cost = trade.get("size", TRADE_SIZE)
+            # Fee real de Polymarket (31-ago-2026, ver comentario al inicio de
+            # shadow_logger.py, verificado contra la doc oficial): fee =
+            # shares*0.07*price*(1-price), solo al taker — equivale a
+            # `cost*0.07*(1-price)` en términos de costo, cobrado en la
+            # ENTRADA, independiente de si gana o pierde. Antes esto NO se
+            # descontaba en las derrotas y usaba una fórmula distinta en las
+            # victorias. Impacto real verificado sobre los 603 trades a la
+            # fecha: -$141.57 (fórmula vieja) -> -$144.31 (correcta) — no
+            # explica las pérdidas, el panorama real es levemente peor.
+            fee = cost * 0.07 * (1.0 - entry_price)
             if win:
-                pnl = cost * ((1.0 - entry_price) / entry_price) * (1 - 0.07)
+                pnl = cost * ((1.0 - entry_price) / entry_price) - fee
             else:
-                pnl = -cost
+                pnl = -cost - fee
             result = {**trade, "outcome": outcome, "win": win, "pnl": pnl}
             self.results.append(result)
             self.today_pnl += pnl

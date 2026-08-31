@@ -167,11 +167,17 @@ class PaperTraderV2:
             size = trade["size"]
             entry_price = trade.get("price", 0.5)
             win = (side == outcome)
+            # Fee real de Polymarket (31-ago-2026, ver comentario al inicio de
+            # shadow_logger.py): fee = shares*0.07*price*(1-price), cobrado
+            # solo al taker, en la ENTRADA — equivale a `size*0.07*(1-price)`
+            # en términos de costo, independiente de si gana o pierde.
+            fee = size * 0.07 * (1.0 - entry_price)
             if win:
-                pnl = size * ((1.0 - entry_price) / entry_price) * (1 - 0.07)
+                pnl = size * ((1.0 - entry_price) / entry_price) - fee
+                self.balance += size + pnl
             else:
-                pnl = -size
-            self.balance += size + pnl if win else 0
+                pnl = -size - fee
+                self.balance -= fee
             self._save_balance()
 
             if self.conn:
