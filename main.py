@@ -48,6 +48,12 @@ if config.SHADOW_MODE_ENABLED:
 if config.SHADOW_MODE_ENABLED:
     from kalshi_feed import start_kalshi_feed, get_kalshi_feed
 
+# Libro de órdenes real de Polymarket — shadow-only, alimenta la
+# descomposición de ejecución de favorite (delay de 250ms/spread/fee).
+# Ver polymarket_book_feed.py.
+if config.SHADOW_MODE_ENABLED:
+    from polymarket_book_feed import start_book_feed, get_book_feed
+
 # Delta mínimo del activo correlacionado para contar como confirmación cruzada
 CROSS_ASSET_MIN_DELTA = 0.0003
 
@@ -138,6 +144,7 @@ def trading_loop():
     paper_v2 = get_trader_v2() if config.SHADOW_MODE_ENABLED else None
     order_flow = get_order_flow_feed() if config.SHADOW_MODE_ENABLED else None
     kalshi = get_kalshi_feed() if config.SHADOW_MODE_ENABLED else None
+    book_feed = get_book_feed() if config.SHADOW_MODE_ENABLED else None
 
     mode_desc = "LIVE-v1" if live else ("LIVE-v2" if live_v2 else "PAPER")
     if live and live_v2:
@@ -147,7 +154,7 @@ def trading_loop():
 
     while True:
         try:
-            _tick(scanner, feed, paper, live, shadow, chainlink, paper_v2, order_flow, live_v2, kalshi)
+            _tick(scanner, feed, paper, live, shadow, chainlink, paper_v2, order_flow, live_v2, kalshi, book_feed)
         except Exception as e:
             logger.error(f"Tick error: {e}")
         time.sleep(10)
@@ -175,7 +182,7 @@ def _cross_asset_confirm(feed, asset: str) -> str | None:
     return None
 
 
-def _tick(scanner, feed, paper, live, shadow=None, chainlink=None, paper_v2=None, order_flow=None, live_v2=None, kalshi=None):
+def _tick(scanner, feed, paper, live, shadow=None, chainlink=None, paper_v2=None, order_flow=None, live_v2=None, kalshi=None, book_feed=None):
     resolve_expired(paper)
 
     if paper_v2:
@@ -186,6 +193,10 @@ def _tick(scanner, feed, paper, live, shadow=None, chainlink=None, paper_v2=None
             shadow.resolve_pending(chainlink, feed)
         except Exception as e:
             logger.debug(f"Shadow resolve_pending error: {e}")
+        try:
+            shadow.resolve_pending_execution()
+        except Exception as e:
+            logger.debug(f"Shadow resolve_pending_execution error: {e}")
 
     if live:
         resolve_live_expired(live)
@@ -218,6 +229,13 @@ def _tick(scanner, feed, paper, live, shadow=None, chainlink=None, paper_v2=None
     paper_v2_open = set(paper_v2.open_positions.keys()) if paper_v2 else set()
     live_v2_open = set(live_v2.open_positions.keys()) if live_v2 else set()
 
+    # Tokens de los mercados que van a evaluarse esta vuelta (los que pasan
+    # el filtro de ventana de entrada más abajo) — se juntan acá para
+    # suscribir el book_feed a exactamente esos, así el libro ya está
+    # llegando cuando (si) dispara una señal de favorite. Ver
+    # polymarket_book_feed.py.
+    book_tokens = set()
+
     for market in markets:
         market_id = market["id"]
         if not market_id:
@@ -228,6 +246,12 @@ def _tick(scanner, feed, paper, live, shadow=None, chainlink=None, paper_v2=None
             continue
 
         asset = market["asset"]
+
+        if book_feed:
+            tokens_dict = market.get("tokens") or {}
+            for tid in tokens_dict.values():
+                if tid:
+                    book_tokens.add(tid)
 
         # v2 (TWAP + bandas de precio) y el shadow-logger NO dependen del
         # feed de Kraken para nada — evaluarlos acá, ANTES de los checks de
@@ -254,6 +278,15 @@ def _tick(scanner, feed, paper, live, shadow=None, chainlink=None, paper_v2=None
                                                market.get("seconds_left"))
                     except Exception as e:
                         logger.debug(f"log_price_tick error [{asset}]: {e}")
+
+                    if book_feed and not signal_v2["blocked"] and signal_v2["band"] == "favorite":
+                        try:
+                            shadow.log_execution_snapshot(
+                                market, signal_v2["entry_price"], signal_v2["side"],
+                                signal_v2["token_id"], book_feed,
+                            )
+                        except Exception as e:
+                            logger.debug(f"log_execution_snapshot error [{asset}]: {e}")
 
                 if not signal_v2["blocked"]:
                     if paper_v2 and market_id not in paper_v2_open:
@@ -381,6 +414,12 @@ def _tick(scanner, feed, paper, live, shadow=None, chainlink=None, paper_v2=None
                     tokens=market["tokens"],
                 )
 
+    if book_feed:
+        try:
+            book_feed.set_tokens(book_tokens)
+        except Exception as e:
+            logger.debug(f"book_feed.set_tokens error: {e}")
+
 
 def get_prices_snapshot():
     feed = get_feed()
@@ -457,6 +496,7 @@ def main():
         start_chainlink_feed()
         start_order_flow_feed()
         start_kalshi_feed()
+        start_book_feed()
 
     t = threading.Thread(target=trading_loop, daemon=True)
     t.start()

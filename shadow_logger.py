@@ -157,6 +157,35 @@ CREATE TABLE IF NOT EXISTS shadow_price_ticks (
     twap60_now FLOAT
 );
 CREATE INDEX IF NOT EXISTS idx_shadow_price_ticks_market ON shadow_price_ticks (market_id, ts);
+
+-- 31-ago-2026 (sugerido por la otra IA): descomposición de ejecución para
+-- favorite — separar cuánto del edge se pierde en el delay de 250ms del
+-- taker vs en el spread vs en el fee. Por cada señal en rango favorite se
+-- guarda el book (best_bid/best_ask de polymarket_book_feed.py) en el
+-- instante de la señal y en +100/250/500ms, +1/2/5/10s — una sola fila
+-- por señal (no una por tick), escrita ~10s después con todas las
+-- capturas ya hechas. actual_outcome se completa después, igual que
+-- shadow_decisions.
+CREATE TABLE IF NOT EXISTS shadow_execution_decomposition (
+    id SERIAL PRIMARY KEY,
+    market_id TEXT,
+    asset TEXT,
+    token_id TEXT,
+    side TEXT,
+    p_signal FLOAT,
+    signal_ts TIMESTAMPTZ DEFAULT NOW(),
+    best_bid_0 FLOAT, best_ask_0 FLOAT,
+    best_bid_100ms FLOAT, best_ask_100ms FLOAT,
+    best_bid_250ms FLOAT, best_ask_250ms FLOAT,
+    best_bid_500ms FLOAT, best_ask_500ms FLOAT,
+    best_bid_1s FLOAT, best_ask_1s FLOAT,
+    best_bid_2s FLOAT, best_ask_2s FLOAT,
+    best_bid_5s FLOAT, best_ask_5s FLOAT,
+    best_bid_10s FLOAT, best_ask_10s FLOAT,
+    resolved_at TIMESTAMPTZ,
+    actual_outcome TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_shadow_execdecomp_market ON shadow_execution_decomposition (market_id);
 """
 
 
@@ -283,6 +312,104 @@ class ShadowLogger:
                 ))
         except Exception as e:
             logger.debug(f"log_price_tick error [{market.get('asset')}]: {e}")
+
+    # (label sufijo de columna, segundos desde la señal) — ver
+    # shadow_execution_decomposition en el DDL.
+    _EXEC_DECOMP_DELAYS = [
+        ("0", 0.0), ("100ms", 0.1), ("250ms", 0.25), ("500ms", 0.5),
+        ("1s", 1.0), ("2s", 2.0), ("5s", 5.0), ("10s", 10.0),
+    ]
+
+    def log_execution_snapshot(self, market, price, side, token_id, book_feed):
+        """Dispara UNA vez por mercado (mismo patrón que _logged en
+        log_decision, pero con prefijo para no chocar con esas claves) la
+        captura del libro real en el instante de la señal y en cada delay
+        de _EXEC_DECOMP_DELAYS. Corre en un hilo aparte porque tarda ~10s
+        en terminar (duerme entre capturas) — nunca debe bloquear el tick
+        principal. best-effort, igual que el resto de shadow_logger."""
+        if not self.conn or not token_id:
+            return
+        market_id = str(market["id"])
+        key = f"execdecomp:{market_id}"
+        with self._lock:
+            if key in self._logged:
+                return
+            self._logged.add(key)
+        threading.Thread(
+            target=self._capture_execution_decomposition,
+            args=(market_id, market["asset"], token_id, side, price, book_feed),
+            daemon=True,
+        ).start()
+
+    def _capture_execution_decomposition(self, market_id, asset, token_id, side, price, book_feed):
+        row = {
+            "market_id": market_id, "asset": asset, "token_id": token_id,
+            "side": side, "p_signal": price,
+        }
+        prev_delay = 0.0
+        for label, delay in self._EXEC_DECOMP_DELAYS:
+            wait = delay - prev_delay
+            if wait > 0:
+                time.sleep(wait)
+            prev_delay = delay
+            try:
+                book = book_feed.get_book(token_id)
+            except Exception:
+                book = {}
+            row[f"best_bid_{label}"] = _safe(book.get("best_bid"))
+            row[f"best_ask_{label}"] = _safe(book.get("best_ask"))
+
+        if not self.conn:
+            return
+        try:
+            cols = ", ".join(row.keys())
+            placeholders = ", ".join(f"%({k})s" for k in row.keys())
+            with self.conn.cursor() as cur:
+                cur.execute(
+                    f"INSERT INTO shadow_execution_decomposition ({cols}) VALUES ({placeholders})",
+                    row,
+                )
+        except Exception as e:
+            logger.error(f"log_execution_snapshot insert error [{market_id}]: {e}")
+
+    def resolve_pending_execution(self):
+        """Mismo patrón que resolve_pending() pero para
+        shadow_execution_decomposition — se mantiene separado porque son
+        tablas distintas con su propio ciclo de vida, no vale la pena
+        mezclarlas en un solo loop por ahorrar una consulta a Gamma."""
+        if not self.conn:
+            return
+        try:
+            with self.conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute("""
+                    SELECT DISTINCT market_id FROM shadow_execution_decomposition
+                    WHERE resolved_at IS NULL
+                """)
+                pending = cur.fetchall()
+        except Exception as e:
+            logger.error(f"Shadow resolve_pending_execution query error: {e}")
+            return
+
+        for row in pending:
+            market_id = row["market_id"]
+            try:
+                r = requests.get(f"{GAMMA_API}/markets/{market_id}", timeout=8)
+                if r.status_code != 200:
+                    continue
+                m = r.json()
+                if not (m.get("closed") or m.get("resolved")):
+                    continue
+                outcome = _determine_outcome(m)
+                if not outcome:
+                    continue
+                with self.conn.cursor() as cur:
+                    cur.execute("""
+                        UPDATE shadow_execution_decomposition
+                        SET resolved_at = NOW(), actual_outcome = %s
+                        WHERE market_id = %s
+                    """, (outcome, market_id))
+            except Exception as e:
+                logger.debug(f"Shadow resolve_pending_execution error {market_id}: {e}")
 
     def log_decision(self, market, indicators, signal, chainlink_feed, kraken_window_ts, kraken_ref_open, order_flow_feed=None, kalshi_feed=None):
         if not self.conn:
