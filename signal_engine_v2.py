@@ -92,7 +92,21 @@ logger = logging.getLogger(__name__)
 CHEAP_MIN_CONFIRMATIONS = 2
 CHEAP_MIN = 0.20
 CHEAP_MAX = 0.55
-FAVORITE_MIN = 0.80
+# FAVORITE_MIN subido de 0.80 a 0.86 (31-ago-2026): con favorite ya
+# pausada de plata real, se revisaron sub-tramos finos de 0.80-0.97 con
+# la fórmula de fee correcta, reciente (5 días) vs histórico:
+#   0.80-0.83: histórico +0.51% -> reciente -1.93% (se dio vuelta)
+#   0.83-0.86: histórico +3.87% -> reciente -1.12% (se dio vuelta)
+#   0.86-0.89 a 0.95-0.97: todos siguen positivos recientes, alguno mejor
+#   que su propio histórico (0.89-0.92: +1.43% -> +3.83%).
+# Mismo patrón que motivó subir 0.75->0.80 hace dos días — la zona pegada
+# al límite es la que se degrada, no toda la banda. Cortando 0.80-0.86 el
+# edge reciente del resto sube de +0.41% a ~+1.7%. OJO: esto se decidió
+# mirando el mismo histórico que ya se usó varias veces hoy (data
+# snooping real) — se sube el filtro para paper/shadow, pero NO se
+# reactiva plata real todavía con esto solo; se valida con días nuevos
+# antes de volver a arriesgar capital acá (ver LIVE_V2_DISABLED_BANDS).
+FAVORITE_MIN = 0.86
 FAVORITE_MAX = 0.97
 MIN_REL_DELTA_CHEAP = 0.0001
 TRADE_FAVORITE_BAND = True
