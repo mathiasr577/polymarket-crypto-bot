@@ -242,7 +242,17 @@ class ShadowLogger:
     # 31 de 48 mercados en los primeros 2 días quedaron con menos de 3
     # fotos, muy poco para ver cómo se mueve el precio. Ampliar la ventana
     # de precio da más tiempo dentro de la zona capturada por mercado.
-    PRICE_TICK_MAX_PRICE = 0.55
+    #
+    # Ampliado de 0.55 a 0.99 (31-ago-2026): esta tabla se armó pensando
+    # solo en cheap, pero es exactamente lo que hace falta para el "oracle
+    # test" que propuso la otra IA sobre favorite (¿conocer el TWAP a
+    # t+5/10/20s hubiera mejorado mucho la predicción?) y para intentar
+    # predecir el re-pricing futuro de Polymarket en vez del resultado
+    # final — ninguno de los dos se puede hacer sin una serie de tiempo
+    # por mercado en el rango de precio de favorite (0.75-0.97), que hoy
+    # no existe. Puro logging adicional, no toca ninguna decisión — deja
+    # acumular unos días antes de intentar esos dos tests.
+    PRICE_TICK_MAX_PRICE = 0.99
 
     def log_price_tick(self, market, twap60_open, twap60_now, seconds_remaining):
         """Sin guard de 'una vez por mercado' a propósito — ver
