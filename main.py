@@ -34,7 +34,7 @@ if config.SHADOW_MODE_ENABLED:
 # plata real. Depende del feed de Chainlink, así que solo corre si
 # SHADOW_MODE_ENABLED también está prendido.
 if config.SHADOW_MODE_ENABLED:
-    from signal_engine_v2 import generate_signal_v2, ENTRY_WINDOW_START as V2_ENTRY_START, ENTRY_WINDOW_END as V2_ENTRY_END
+    from signal_engine_v2 import generate_signal_v2, _count_confirmations, ENTRY_WINDOW_START as V2_ENTRY_START, ENTRY_WINDOW_END as V2_ENTRY_END
     from paper_trader_v2 import get_trader_v2
 
 # Order flow de Bybit (trades agresivos reales BTCUSDT/ETHUSDT) — shadow-only,
@@ -421,6 +421,64 @@ def _tick(scanner, feed, paper, live, shadow=None, chainlink=None, paper_v2=None
             logger.debug(f"book_feed.set_tokens error: {e}")
 
 
+BOOK_SNAPSHOT_INTERVAL_SEC = 3
+BOOK_SNAPSHOT_RESOLVE_EVERY_N = 10  # cada ~30s, no en cada foto — ahorra pegarle a Gamma de más
+
+
+def _book_snapshot_loop(scanner, chainlink, order_flow, book_feed, shadow):
+    """Loop propio, más rápido que trading_loop's ~10s — ver diseño del
+    backtest de maker (1-sep-2026, conversación) y shadow_book_snapshots
+    en shadow_logger.py. Corre para TODOS los mercados en ventana de
+    entrada, no solo favorite ni solo los que terminan tradeándose —
+    la gracia es tener la trayectoria completa del libro real + qué
+    hubiera dicho la señal en cada instante, para poder simular después
+    cotizar-y-cancelar en vez de cruzar el spread. Solo lectura/logging,
+    no toca ninguna decisión de trading."""
+    tick_n = 0
+    while True:
+        try:
+            tick_n += 1
+            markets = scanner.get_markets()
+            for market in markets or []:
+                seconds_left = market.get("seconds_left", 300)
+                if seconds_left > V2_ENTRY_START or seconds_left < V2_ENTRY_END:
+                    continue
+                asset = market["asset"]
+                try:
+                    snap = chainlink.get_snapshot(asset)
+                    window_ts = int(time.time() // 300) * 300
+                    w60 = chainlink.get_window_twap(asset, 60, window_ts)
+                    twap60_open = w60.get("open")
+                    twap60_now = snap.get("twap60_now")
+                    if twap60_open is None or twap60_now is None or not twap60_open:
+                        continue
+                    diff = twap60_now - twap60_open
+                    if diff == 0:
+                        continue
+                    side = "UP" if diff > 0 else "DOWN"
+
+                    cs = dict(snap)
+                    cs["twap60_now"] = twap60_now
+                    if order_flow:
+                        cs["ofi_15s"] = order_flow.get_ofi(asset, 15).get("ofi")
+                    cs["pressure_integral"] = chainlink.get_pressure(asset, window_ts).get("integral")
+                    confirmations, _ = _count_confirmations(cs, side)
+
+                    shadow.log_book_snapshot(market, twap60_open, twap60_now, confirmations, side, book_feed)
+                except Exception as e:
+                    logger.debug(f"_book_snapshot_loop error [{asset}]: {e}")
+
+            if tick_n % BOOK_SNAPSHOT_RESOLVE_EVERY_N == 0:
+                try:
+                    shadow.resolve_pending_book_snapshots()
+                except Exception as e:
+                    logger.debug(f"resolve_pending_book_snapshots error: {e}")
+        except Exception as e:
+            logger.error(f"_book_snapshot_loop tick error: {e}")
+
+        time.sleep(BOOK_SNAPSHOT_INTERVAL_SEC)
+
+
 def get_prices_snapshot():
     feed = get_feed()
     result = {}
@@ -500,6 +558,14 @@ def main():
 
     t = threading.Thread(target=trading_loop, daemon=True)
     t.start()
+
+    if config.SHADOW_MODE_ENABLED:
+        t2 = threading.Thread(
+            target=_book_snapshot_loop,
+            args=(get_scanner(), get_chainlink_feed(), get_order_flow_feed(), get_book_feed(), get_shadow_logger()),
+            daemon=True,
+        )
+        t2.start()
 
     flask_app = create_dashboard(
         get_stats_fn=get_combined_stats,

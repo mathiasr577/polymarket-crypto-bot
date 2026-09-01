@@ -186,6 +186,34 @@ CREATE TABLE IF NOT EXISTS shadow_execution_decomposition (
     actual_outcome TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_shadow_execdecomp_market ON shadow_execution_decomposition (market_id);
+
+-- 1-sep-2026: diseño del backtest de maker (cotizar + cancelar en vez de
+-- cruzar el spread) — ver conversación. shadow_execution_decomposition
+-- solo capturaba 8 puntos fijos después de UNA señal puntual, no alcanza
+-- para simular "dejé una cotización parada en el segundo X y la fui
+-- reevaluando cada pocos segundos hasta que cerró la ventana". Esta tabla
+-- guarda una foto cada ~3s de AMBOS lados del libro (no solo el que
+-- eventualmente se tradea) + qué diría la señal en ESE instante exacto
+-- (recalculada, no la de la decisión original) — para TODOS los
+-- mercados en ventana de entrada, no solo favorite. Con esto se puede
+-- reconstruir después, para cualquier precio de cotización candidato:
+-- ¿se hubiera llenado?, ¿la señal hubiera avisado a tiempo de cancelar?,
+-- ¿qué pasó con el precio después del fill (markout)?
+CREATE TABLE IF NOT EXISTS shadow_book_snapshots (
+    id SERIAL PRIMARY KEY,
+    market_id TEXT,
+    asset TEXT,
+    ts TIMESTAMPTZ DEFAULT NOW(),
+    seconds_remaining FLOAT,
+    up_best_bid FLOAT, up_best_ask FLOAT,
+    down_best_bid FLOAT, down_best_ask FLOAT,
+    twap60_open FLOAT, twap60_now FLOAT,
+    signal_side TEXT,
+    confirmations INT,
+    resolved_at TIMESTAMPTZ,
+    actual_outcome TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_shadow_book_snapshots_market ON shadow_book_snapshots (market_id, ts);
 """
 
 
@@ -410,6 +438,74 @@ class ShadowLogger:
                     """, (outcome, market_id))
             except Exception as e:
                 logger.debug(f"Shadow resolve_pending_execution error {market_id}: {e}")
+
+    def log_book_snapshot(self, market, twap60_open, twap60_now, confirmations, signal_side, book_feed):
+        """Una foto del libro real (ambos lados) + qué diría la señal en
+        ESTE instante — ver shadow_book_snapshots en el DDL. Se llama
+        desde un loop propio, más rápido que el tick principal (main.py,
+        _book_snapshot_loop), NO desde log_decision — sin guard de 'una
+        vez por mercado', a propósito: la gracia es tener muchas fotos
+        por mercado para poder reconstruir la trayectoria completa."""
+        if not self.conn:
+            return
+        tokens = market.get("tokens") or {}
+        up_token = tokens.get("UP")
+        down_token = tokens.get("DOWN")
+        up_book = book_feed.get_book(up_token) if up_token else {}
+        down_book = book_feed.get_book(down_token) if down_token else {}
+        try:
+            with self.conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO shadow_book_snapshots
+                    (market_id, asset, seconds_remaining, up_best_bid, up_best_ask,
+                     down_best_bid, down_best_ask, twap60_open, twap60_now,
+                     signal_side, confirmations)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                """, (
+                    str(market["id"]), market["asset"], market.get("seconds_left"),
+                    _safe(up_book.get("best_bid")), _safe(up_book.get("best_ask")),
+                    _safe(down_book.get("best_bid")), _safe(down_book.get("best_ask")),
+                    _safe(twap60_open), _safe(twap60_now), signal_side, confirmations,
+                ))
+        except Exception as e:
+            logger.debug(f"log_book_snapshot error [{market.get('asset')}]: {e}")
+
+    def resolve_pending_book_snapshots(self):
+        """Mismo patrón que resolve_pending_execution() — tabla y ciclo
+        de vida propios."""
+        if not self.conn:
+            return
+        try:
+            with self.conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute("""
+                    SELECT DISTINCT market_id FROM shadow_book_snapshots
+                    WHERE resolved_at IS NULL
+                """)
+                pending = cur.fetchall()
+        except Exception as e:
+            logger.error(f"Shadow resolve_pending_book_snapshots query error: {e}")
+            return
+
+        for row in pending:
+            market_id = row["market_id"]
+            try:
+                r = requests.get(f"{GAMMA_API}/markets/{market_id}", timeout=8)
+                if r.status_code != 200:
+                    continue
+                m = r.json()
+                if not (m.get("closed") or m.get("resolved")):
+                    continue
+                outcome = _determine_outcome(m)
+                if not outcome:
+                    continue
+                with self.conn.cursor() as cur:
+                    cur.execute("""
+                        UPDATE shadow_book_snapshots
+                        SET resolved_at = NOW(), actual_outcome = %s
+                        WHERE market_id = %s
+                    """, (outcome, market_id))
+            except Exception as e:
+                logger.debug(f"Shadow resolve_pending_book_snapshots error {market_id}: {e}")
 
     def log_decision(self, market, indicators, signal, chainlink_feed, kraken_window_ts, kraken_ref_open, order_flow_feed=None, kalshi_feed=None):
         if not self.conn:
