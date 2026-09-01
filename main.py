@@ -280,10 +280,20 @@ def _tick(scanner, feed, paper, live, shadow=None, chainlink=None, paper_v2=None
                 snap["pressure_integral"] = chainlink.get_pressure(asset, window_ts).get("integral")
 
                 if pressure_bot:
-                    try:
-                        pressure_bot.evaluate(market, snap["pressure_integral"])
-                    except Exception as e:
-                        logger.debug(f"pressure_bot.evaluate error [{asset}]: {e}")
+                    # Mismo horario que el resto de plata real (9AM-6PM ET) —
+                    # se calcula acá porque este bloque corre ANTES de donde
+                    # se calcula trading_hours más abajo (ver comentario de
+                    # arriba). Encontrado el 1-sep-2026 al revisar el código
+                    # con el usuario: pressure_bot había quedado corriendo
+                    # 24/7 sin querer, incluida la madrugada donde ya
+                    # medimos que la liquidez es mucho peor.
+                    _hour_utc = datetime.now(timezone.utc).hour
+                    _pressure_trading_hours = config.TRADING_START_UTC <= _hour_utc < config.TRADING_END_UTC
+                    if _pressure_trading_hours:
+                        try:
+                            pressure_bot.evaluate(market, snap["pressure_integral"])
+                        except Exception as e:
+                            logger.debug(f"pressure_bot.evaluate error [{asset}]: {e}")
 
                 signal_v2 = generate_signal_v2(snap, market)
 
