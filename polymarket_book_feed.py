@@ -83,6 +83,7 @@ STALE_THRESHOLD_SEC = 30
 
 MAX_TRADE_AGE_SEC = 120  # no hace falta guardar más que un par de veces la ventana de foto (~3s) más margen
 _LAST_TRADE_SAMPLE_LOGGED = {"done": False}
+_UNKNOWN_EVENTS_LOGGED = {}  # event_type/type -> cuántas veces ya se logueó (máx 2 c/u)
 
 
 class PolymarketBookFeed:
@@ -258,13 +259,18 @@ class PolymarketBookFeed:
             elif ev.get("type") == "last_trade_price" or event_type == "last_trade_price":
                 # ver docstring — envoltorio distinto (payload anidado),
                 # y todavía sin verificar en vivo, log agresivo a propósito.
+                # El log va ANTES de intentar parsear nada — si el nombre
+                # real de algún campo no coincide con lo que asumimos acá,
+                # igual queremos ver el payload crudo en vez de perdernos
+                # el evento entero en silencio (bug real encontrado
+                # 1-sep-2026: estaba después del chequeo de asset_id).
+                if not _LAST_TRADE_SAMPLE_LOGGED["done"]:
+                    logger.info(f"🔍 last_trade_price primera muestra real: {json.dumps(ev)[:500]}")
+                    _LAST_TRADE_SAMPLE_LOGGED["done"] = True
                 payload = ev.get("payload") if isinstance(ev.get("payload"), dict) else ev
                 asset_id = payload.get("tokenId") or payload.get("asset_id")
                 if not asset_id:
                     continue
-                if not _LAST_TRADE_SAMPLE_LOGGED["done"]:
-                    logger.info(f"🔍 last_trade_price primera muestra real: {json.dumps(ev)[:500]}")
-                    _LAST_TRADE_SAMPLE_LOGGED["done"] = True
                 trade = {
                     "price": _to_float(payload.get("price")),
                     "size": _to_float(payload.get("size")),
@@ -278,6 +284,16 @@ class PolymarketBookFeed:
                     cutoff = now - MAX_TRADE_AGE_SEC
                     while dq and dq[0]["ts"] < cutoff:
                         dq.pop(0)
+
+            elif event_type or ev.get("type"):
+                # Catch-all: cualquier event_type/type que no sea book,
+                # price_change o last_trade_price — si la doc está mal de
+                # nuevo (ya pasó una vez con best_bid_ask) esto es lo que
+                # nos permite verlo en vez de perderlo en silencio.
+                _seen = _UNKNOWN_EVENTS_LOGGED.setdefault(event_type or ev.get("type"), 0)
+                if _seen < 2:
+                    logger.info(f"🔍 event_type/type no reconocido: {json.dumps(ev)[:500]}")
+                    _UNKNOWN_EVENTS_LOGGED[event_type or ev.get("type")] = _seen + 1
 
     def get_book(self, asset_id: str) -> dict:
         """None-safe. Devuelve el último estado conocido del libro para
