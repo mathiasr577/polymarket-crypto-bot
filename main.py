@@ -435,6 +435,7 @@ def _book_snapshot_loop(scanner, chainlink, order_flow, book_feed, shadow):
     cotizar-y-cancelar en vez de cruzar el spread. Solo lectura/logging,
     no toca ninguna decisión de trading."""
     tick_n = 0
+    trade_since_ts = {}  # token_id -> último ts drenado, ver shadow.log_trades
     while True:
         try:
             tick_n += 1
@@ -444,6 +445,15 @@ def _book_snapshot_loop(scanner, chainlink, order_flow, book_feed, shadow):
                 if seconds_left > V2_ENTRY_START or seconds_left < V2_ENTRY_END:
                     continue
                 asset = market["asset"]
+
+                # Tape de trades — independiente del feed de Chainlink, así
+                # que va afuera del try/twap60 de abajo (no se quiere perder
+                # esto solo porque falte data de TWAP en un tick puntual).
+                try:
+                    trade_since_ts = shadow.log_trades(market, book_feed, trade_since_ts)
+                except Exception as e:
+                    logger.debug(f"log_trades error [{asset}]: {e}")
+
                 try:
                     snap = chainlink.get_snapshot(asset)
                     window_ts = int(time.time() // 300) * 300

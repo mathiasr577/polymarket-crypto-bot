@@ -46,6 +46,26 @@ haría falta parchear cada nivel exacto, más trabajo del que se justifica
 para el v1). best_bid/best_ask/spread SÍ se mantienen en tiempo real
 (vienen directo en cada price_change) — es lo que hace falta para medir
 delay_drag y spread_drag, el resto puede esperar a una v2 si hace falta.
+
+1-sep-2026 (sugerido por la otra IA, verificado contra la doc real antes
+de implementar): se agrega el tape de trades (evento last_trade_price) y
+el tamaño en el mejor bid/ask — hacían falta para dos cosas del diseño
+del backtest de maker: (a) clasificar fills de forma conservadora
+(certain/possible/no_fill necesita saber si pasó volumen real, no solo
+si el precio tocó el nivel) y (b) estimar el pool de rebate por mercado
+y la dilución contra otros makers (tamaño en reposo = liquidez de otros
+market makers). Formato de last_trade_price verificado contra la doc
+(no se pudo confirmar en vivo todavía — varios intentos de conexión
+cayeron en ventanas sin actividad — así que el parseo es defensivo y
+loguea el payload crudo las primeras veces, mismo criterio que con FAK):
+
+    {"topic": "market", "type": "last_trade_price", "payload": {
+        "market": "0x...", "tokenId": "...", "price": "0.08",
+        "size": "219.217767", "feeRateBps": "0", "side": "SELL",
+        "timestamp": "<ms>", "transactionHash": "0x..."}}
+
+Nota el envoltorio distinto (top-level "type"+"payload", no "event_type"
+plano como book/price_change) — parseo defensivo para los dos formatos.
 """
 import json
 import logging
@@ -61,10 +81,15 @@ PING_INTERVAL_SEC = 15
 STALE_THRESHOLD_SEC = 30
 
 
+MAX_TRADE_AGE_SEC = 120  # no hace falta guardar más que un par de veces la ventana de foto (~3s) más margen
+_LAST_TRADE_SAMPLE_LOGGED = {"done": False}
+
+
 class PolymarketBookFeed:
     def __init__(self):
         self._lock = threading.Lock()
         self._books = {}  # asset_id -> {best_bid, best_ask, bids, asks, updated_at}
+        self._trades = {}  # asset_id -> list of {price, size, side, ts, tx_hash}, más nuevo al final
         self._desired_tokens = set()
         self._subscribed_tokens = set()
         self._connected = False
@@ -216,17 +241,43 @@ class PolymarketBookFeed:
                 asset_id = ev.get("asset_id")
                 bids = ev.get("bids") or []
                 asks = ev.get("asks") or []
-                best_bid = max((_to_float(b.get("price")) for b in bids), default=None) if bids else None
-                best_ask = min((_to_float(a.get("price")) for a in asks), default=None) if asks else None
+                best_bid, best_bid_size = _best_level(bids, pick_max=True)
+                best_ask, best_ask_size = _best_level(asks, pick_max=False)
                 with self._lock:
                     book = self._books.setdefault(asset_id, {})
                     book["bids"] = bids
                     book["asks"] = asks
                     if best_bid is not None:
                         book["best_bid"] = best_bid
+                        book["best_bid_size"] = best_bid_size
                     if best_ask is not None:
                         book["best_ask"] = best_ask
+                        book["best_ask_size"] = best_ask_size
                     book["updated_at"] = now
+
+            elif ev.get("type") == "last_trade_price" or event_type == "last_trade_price":
+                # ver docstring — envoltorio distinto (payload anidado),
+                # y todavía sin verificar en vivo, log agresivo a propósito.
+                payload = ev.get("payload") if isinstance(ev.get("payload"), dict) else ev
+                asset_id = payload.get("tokenId") or payload.get("asset_id")
+                if not asset_id:
+                    continue
+                if not _LAST_TRADE_SAMPLE_LOGGED["done"]:
+                    logger.info(f"🔍 last_trade_price primera muestra real: {json.dumps(ev)[:500]}")
+                    _LAST_TRADE_SAMPLE_LOGGED["done"] = True
+                trade = {
+                    "price": _to_float(payload.get("price")),
+                    "size": _to_float(payload.get("size")),
+                    "side": payload.get("side"),
+                    "ts": now,
+                    "tx_hash": payload.get("transactionHash"),
+                }
+                with self._lock:
+                    dq = self._trades.setdefault(asset_id, [])
+                    dq.append(trade)
+                    cutoff = now - MAX_TRADE_AGE_SEC
+                    while dq and dq[0]["ts"] < cutoff:
+                        dq.pop(0)
 
     def get_book(self, asset_id: str) -> dict:
         """None-safe. Devuelve el último estado conocido del libro para
@@ -245,10 +296,36 @@ class PolymarketBookFeed:
             "feed_lag_ms": age * 1000,
             "best_bid": bb if connected else None,
             "best_ask": ba if connected else None,
+            "best_bid_size": book.get("best_bid_size") if connected else None,
+            "best_ask_size": book.get("best_ask_size") if connected else None,
             "spread": spread if connected else None,
             "bids": book.get("bids") if connected else None,
             "asks": book.get("asks") if connected else None,
         }
+
+    def get_new_trades(self, asset_id: str, since_ts: float) -> list:
+        """Trades reales (evento last_trade_price) para ese token desde
+        since_ts (epoch seconds, time.time()) — usar el ts del último
+        drenado para no relogear los mismos trades en cada foto."""
+        with self._lock:
+            trades = list(self._trades.get(asset_id, []))
+        return [t for t in trades if t["ts"] > since_ts]
+
+
+def _best_level(levels: list, pick_max: bool) -> tuple:
+    """Encuentra el mejor precio (máximo para bids, mínimo para asks) Y
+    su tamaño — los arrays de bids/asks no vienen en un orden garantizado
+    (visto en vivo: a veces ascendente, a veces descendente), así que no
+    alcanza con tomar el primer elemento."""
+    best_price, best_size = None, None
+    for level in levels or []:
+        p = _to_float(level.get("price"))
+        if p is None:
+            continue
+        if best_price is None or (p > best_price if pick_max else p < best_price):
+            best_price = p
+            best_size = _to_float(level.get("size"))
+    return best_price, best_size
 
 
 def _to_float(v):

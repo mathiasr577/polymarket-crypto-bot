@@ -214,6 +214,31 @@ CREATE TABLE IF NOT EXISTS shadow_book_snapshots (
     actual_outcome TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_shadow_book_snapshots_market ON shadow_book_snapshots (market_id, ts);
+-- 1-sep-2026 (sugerido por la otra IA): tamaño en el mejor nivel — hace
+-- falta para la cola/dilución de otros makers, no solo el precio.
+ALTER TABLE shadow_book_snapshots ADD COLUMN IF NOT EXISTS up_best_bid_size FLOAT;
+ALTER TABLE shadow_book_snapshots ADD COLUMN IF NOT EXISTS up_best_ask_size FLOAT;
+ALTER TABLE shadow_book_snapshots ADD COLUMN IF NOT EXISTS down_best_bid_size FLOAT;
+ALTER TABLE shadow_book_snapshots ADD COLUMN IF NOT EXISTS down_best_ask_size FLOAT;
+
+-- 1-sep-2026 (sugerido por la otra IA): tape de trades reales (evento
+-- last_trade_price de polymarket_book_feed.py) — hace falta para
+-- clasificar fills sin asumir "tocó mi precio = me llenó" y para
+-- calcular el pool de rebate por mercado (fee_equivalente de cada trade
+-- real). Dedup por transaction_hash — el mismo trade puede llegar más
+-- de una vez si hay reconexión del feed en medio.
+CREATE TABLE IF NOT EXISTS shadow_trade_tape (
+    id SERIAL PRIMARY KEY,
+    market_id TEXT,
+    asset TEXT,
+    token_id TEXT,
+    side TEXT,
+    price FLOAT,
+    size FLOAT,
+    ts TIMESTAMPTZ DEFAULT NOW(),
+    transaction_hash TEXT UNIQUE
+);
+CREATE INDEX IF NOT EXISTS idx_shadow_trade_tape_market ON shadow_trade_tape (market_id, ts);
 """
 
 
@@ -458,17 +483,59 @@ class ShadowLogger:
                 cur.execute("""
                     INSERT INTO shadow_book_snapshots
                     (market_id, asset, seconds_remaining, up_best_bid, up_best_ask,
-                     down_best_bid, down_best_ask, twap60_open, twap60_now,
+                     down_best_bid, down_best_ask, up_best_bid_size, up_best_ask_size,
+                     down_best_bid_size, down_best_ask_size, twap60_open, twap60_now,
                      signal_side, confirmations)
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                 """, (
                     str(market["id"]), market["asset"], market.get("seconds_left"),
                     _safe(up_book.get("best_bid")), _safe(up_book.get("best_ask")),
                     _safe(down_book.get("best_bid")), _safe(down_book.get("best_ask")),
+                    _safe(up_book.get("best_bid_size")), _safe(up_book.get("best_ask_size")),
+                    _safe(down_book.get("best_bid_size")), _safe(down_book.get("best_ask_size")),
                     _safe(twap60_open), _safe(twap60_now), signal_side, confirmations,
                 ))
         except Exception as e:
             logger.debug(f"log_book_snapshot error [{market.get('asset')}]: {e}")
+
+    def log_trades(self, market, book_feed, since_ts_by_token: dict) -> dict:
+        """Drena los trades nuevos (last_trade_price) de polymarket_book_feed
+        desde la última vez que se llamó para cada token — ver
+        shadow_trade_tape en el DDL. Devuelve el dict since_ts_by_token
+        actualizado (el caller lo guarda y lo vuelve a pasar la próxima
+        vez) — el dedup real de todos modos lo hace la columna UNIQUE de
+        transaction_hash, esto es solo para no reconsultar trades viejos
+        de más."""
+        if not self.conn:
+            return since_ts_by_token
+        tokens = market.get("tokens") or {}
+        for side, token_id in tokens.items():
+            if not token_id:
+                continue
+            since = since_ts_by_token.get(token_id, 0.0)
+            try:
+                trades = book_feed.get_new_trades(token_id, since)
+            except Exception as e:
+                logger.debug(f"log_trades get_new_trades error [{token_id}]: {e}")
+                continue
+            if not trades:
+                continue
+            since_ts_by_token[token_id] = max(t["ts"] for t in trades)
+            try:
+                with self.conn.cursor() as cur:
+                    for t in trades:
+                        cur.execute("""
+                            INSERT INTO shadow_trade_tape
+                            (market_id, asset, token_id, side, price, size, transaction_hash)
+                            VALUES (%s,%s,%s,%s,%s,%s,%s)
+                            ON CONFLICT (transaction_hash) DO NOTHING
+                        """, (
+                            str(market["id"]), market["asset"], token_id, t.get("side"),
+                            _safe(t.get("price")), _safe(t.get("size")), t.get("tx_hash"),
+                        ))
+            except Exception as e:
+                logger.debug(f"log_trades insert error [{token_id}]: {e}")
+        return since_ts_by_token
 
     def resolve_pending_book_snapshots(self):
         """Mismo patrón que resolve_pending_execution() — tabla y ciclo
