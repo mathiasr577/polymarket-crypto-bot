@@ -54,6 +54,10 @@ if config.SHADOW_MODE_ENABLED:
 if config.SHADOW_MODE_ENABLED:
     from polymarket_book_feed import start_book_feed, get_book_feed
 
+# Bot chico y separado, "presión sola" — plata real chica, completamente
+# aparte del bot principal (que sigue pausado). Ver pressure_bot.py.
+from pressure_bot import PRESSURE_ENABLED, get_pressure_bot
+
 # Delta mínimo del activo correlacionado para contar como confirmación cruzada
 CROSS_ASSET_MIN_DELTA = 0.0003
 
@@ -145,6 +149,7 @@ def trading_loop():
     order_flow = get_order_flow_feed() if config.SHADOW_MODE_ENABLED else None
     kalshi = get_kalshi_feed() if config.SHADOW_MODE_ENABLED else None
     book_feed = get_book_feed() if config.SHADOW_MODE_ENABLED else None
+    pressure_bot = get_pressure_bot() if PRESSURE_ENABLED else None
 
     mode_desc = "LIVE-v1" if live else ("LIVE-v2" if live_v2 else "PAPER")
     if live and live_v2:
@@ -154,7 +159,7 @@ def trading_loop():
 
     while True:
         try:
-            _tick(scanner, feed, paper, live, shadow, chainlink, paper_v2, order_flow, live_v2, kalshi, book_feed)
+            _tick(scanner, feed, paper, live, shadow, chainlink, paper_v2, order_flow, live_v2, kalshi, book_feed, pressure_bot)
         except Exception as e:
             logger.error(f"Tick error: {e}")
         time.sleep(10)
@@ -182,11 +187,14 @@ def _cross_asset_confirm(feed, asset: str) -> str | None:
     return None
 
 
-def _tick(scanner, feed, paper, live, shadow=None, chainlink=None, paper_v2=None, order_flow=None, live_v2=None, kalshi=None, book_feed=None):
+def _tick(scanner, feed, paper, live, shadow=None, chainlink=None, paper_v2=None, order_flow=None, live_v2=None, kalshi=None, book_feed=None, pressure_bot=None):
     resolve_expired(paper)
 
     if paper_v2:
         resolve_expired(paper_v2)  # misma función genérica — solo necesita open_positions/resolve_trade
+
+    if pressure_bot:
+        resolve_expired(pressure_bot)  # misma función genérica
 
     if shadow and chainlink:
         try:
@@ -270,6 +278,13 @@ def _tick(scanner, feed, paper, live, shadow=None, chainlink=None, paper_v2=None
                 if order_flow:
                     snap["ofi_15s"] = order_flow.get_ofi(asset, 15).get("ofi")
                 snap["pressure_integral"] = chainlink.get_pressure(asset, window_ts).get("integral")
+
+                if pressure_bot:
+                    try:
+                        pressure_bot.evaluate(market, snap["pressure_integral"])
+                    except Exception as e:
+                        logger.debug(f"pressure_bot.evaluate error [{asset}]: {e}")
+
                 signal_v2 = generate_signal_v2(snap, market)
 
                 if shadow:
@@ -529,6 +544,8 @@ def get_combined_stats():
 
     if config.SHADOW_MODE_ENABLED:
         base["paper_v2"] = get_trader_v2().get_stats()
+    if PRESSURE_ENABLED:
+        base["pressure_bot"] = get_pressure_bot().get_stats()
     return base
 
 
