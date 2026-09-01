@@ -61,6 +61,11 @@ MAX_LIVE_TRADES = 1_000_000  # sin techo real de trades — corre indefinido
 # (balance real ~$210 hoy, contra ~$289 de arranque de este día) y con
 # favorite pausada de plata real, MAX_CONCURRENT_RISK_USD ($15) también
 # tiene más margen relativo con un tamaño base más chico.
+#
+# 1-sep-2026: pasa a ser el tamaño FIJO de cada trade (ver
+# _current_trade_size) — dos días seguidos de plata real en rojo con el
+# freno de 25% activado, pedido explícito del usuario de sacar la
+# variabilidad por confirmaciones/balance de la ecuación por ahora.
 TRADE_SIZE = 5.0
 MAX_NO_FILLS_HISTORY = 20
 
@@ -577,35 +582,20 @@ class LiveTraderV2:
             self.blocked_count += 1
 
     def _current_trade_size(self, stake_multiplier: float = 1.0) -> float:
-        with self._lock:
-            total = self.total_trades
-        if total < EARLY_PHASE_FLAT_TRADES:
-            # Fase temprana ignora el multiplicador a propósito — su punto
-            # era aislar la ejecución del sizing, y ya quedó atrás (más de
-            # EARLY_PHASE_FLAT_TRADES fills reales hechos).
-            return EARLY_PHASE_FLAT_SIZE
-        # Balance real (misma caché que can_trade()), no day_start+today_pnl
-        # — mismo motivo que el freno de drawdown: today_pnl puede quedar
-        # mal si un fill queda UNKNOWN_FILL y en realidad sí se ejecutó.
-        balance = self._get_cached_balance()
-        if balance <= 0:
-            return MIN_TRADE_USD
-        size = balance * TARGET_RISK_PCT
-        base = min(TRADE_SIZE, max(MIN_TRADE_USD, size))
-        # Sizing por confirmaciones (24-ago-2026) — el mismo multiplicador
-        # que ya se validó varios días en paper (STAKE_MULTIPLIER_PER_
-        # CONFIRMATION en signal_engine_v2.py, 1.0x-2.5x según cuántas de
-        # las 3 señales de confirmación coinciden). Acá, con plata real, se
-        # le pone un techo absoluto propio (LIVE_MAX_STAKE_USD) en vez de
-        # dejar que el multiplicador decida solo — 2.5x sobre el techo base
-        # de $5 daría $12.50, más de lo que se quiere arriesgar por trade.
-        sized = min(LIVE_MAX_STAKE_USD, max(MIN_TRADE_USD, base * stake_multiplier))
+        """1-sep-2026 (pedido explícito del usuario, tras 2 días seguidos
+        de plata real perdiendo con el freno de 25% activado): tamaño FIJO
+        de $5, sin escalar por confirmaciones (el multiplicador ya no
+        aplica acá — sigue viviendo en signal_engine_v2.py/paper_trader_v2
+        para seguir validando la idea, pero deja de mover el tamaño en
+        plata real) ni por balance. Menos varianza por trade, a propósito,
+        mientras se investiga el resto. TARGET_RISK_PCT/LIVE_MAX_STAKE_USD/
+        stake_multiplier quedan sin uso acá, no se borran por si se
+        retoma el sizing proporcional más adelante."""
+        sized = TRADE_SIZE
 
         # Risk budget conjunto BTC/ETH (31-ago-2026) — ver
-        # MAX_CONCURRENT_RISK_USD. Si ya hay otra posición abierta (típico:
-        # BTC y ETH del mismo momento, correlacionados), recorta esta al
-        # espacio que quede del presupuesto combinado en vez de tratarla
-        # como un riesgo totalmente independiente.
+        # MAX_CONCURRENT_RISK_USD. Con $5 fijo esto casi nunca se activa
+        # (2 posiciones = $10 < $15), se deja como red de seguridad.
         with self._lock:
             open_risk_usd = sum(t.get("size", 0) or 0 for t in self.open_positions.values())
         remaining = MAX_CONCURRENT_RISK_USD - open_risk_usd
