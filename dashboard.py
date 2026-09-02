@@ -200,6 +200,51 @@ HTML = """
 </div>
 {% endif %}
 
+{% if stats.pressure_bot is defined %}
+<div class="section">
+  <h2>🌡️ Pressure Bot (señal de presión sola — plata real chica, separado del bot principal)</h2>
+  <div class="grid">
+    <div class="card">
+      <div class="label">Balance</div>
+      <div class="value purple">${{ "%.2f"|format(stats.pressure_bot.balance) }}</div>
+    </div>
+    <div class="card">
+      <div class="label">P&L hoy</div>
+      <div class="value {{ 'green' if stats.pressure_bot.today_pnl >= 0 else 'red' }}">${{ "%+.2f"|format(stats.pressure_bot.today_pnl) }}</div>
+      <div class="sublabel">Total: ${{ "%+.2f"|format(stats.pressure_bot.total_pnl) }}</div>
+    </div>
+    <div class="card">
+      <div class="label">Win rate</div>
+      <div class="value">{{ "%.1f"|format(stats.pressure_bot.win_rate) }}%</div>
+      <div class="sublabel">{{ stats.pressure_bot.wins }}W / {{ stats.pressure_bot.losses }}L</div>
+    </div>
+    <div class="card">
+      <div class="label">Estado</div>
+      <div class="value {{ 'red' if stats.pressure_bot.drawdown_paused else 'green' }}">
+        {{ 'Pausado' if stats.pressure_bot.drawdown_paused else 'Activo' }}
+      </div>
+      <div class="sublabel">{{ stats.pressure_bot.open_count }} abierta(s) · {{ stats.pressure_bot.completed }} trades totales</div>
+    </div>
+  </div>
+  {% if stats.pressure_bot.recent_trades %}
+  <div class="divider"></div>
+  <table>
+    <tr><th>Asset</th><th>Lado</th><th>Precio</th><th>Presión</th><th>Resultado</th><th>PnL</th></tr>
+    {% for t in stats.pressure_bot.recent_trades %}
+    <tr>
+      <td>{{ t.asset }}</td>
+      <td>{{ t.side }}</td>
+      <td>{{ "%.2f"|format(t.price) if t.price else '-' }}</td>
+      <td>{{ "%.1f"|format(t.pressure_at_entry) if t.pressure_at_entry else '-' }}</td>
+      <td class="{{ 'green' if t.win else 'red' }}">{{ 'GANÓ' if t.win else 'PERDIÓ' }}</td>
+      <td class="{{ 'green' if t.pnl and t.pnl >= 0 else 'red' }}">${{ "%+.2f"|format(t.pnl) if t.pnl is not none else '-' }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% endif %}
+</div>
+{% endif %}
+
 {% if shadow_stats and shadow_stats.resolved %}
 <div class="section">
   <h2>🔬 Shadow-mode: Chainlink TWAP vs. ganador real (fase 1)</h2>
