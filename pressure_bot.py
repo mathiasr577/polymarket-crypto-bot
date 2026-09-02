@@ -42,7 +42,20 @@ logger = logging.getLogger(__name__)
 
 PRESSURE_ENABLED = os.environ.get("PRESSURE_BOT_ENABLED", "false").lower() == "true"
 
-PRESSURE_THRESHOLD = 20.0   # validado con datos reales, ver docstring
+# Subido de 20 a 995 (2-sep-2026): el umbral original resultó ser casi un
+# no-op — la distribución real de twap_pressure_integral tiene mediana
+# 140 y percentil 90 en 2524, así que 20 dejaba pasar el 83% de TODAS
+# las lecturas (ver /api/shadow-pressure-distribution). El backtest
+# original (umbrales 0-40) nunca probó si la MAGNITUD de la presión
+# predice algo — solo "algo de señal" vs "cero señal". Repetido con
+# umbrales que sí dividen la distribución real (0/20/140/500/995/2524/
+# 3920, mismo split de dos mitades por tiempo): el acierto y el $/trade
+# suben limpio y ESTABLE en ambas mitades cuanto más alto el umbral —
+# 995 (percentil 75) da 90.1%/90.8% de acierto y +$0.131/+$0.167 por
+# dólar en la mitad vieja/nueva, con volumen todavía razonable
+# (n=935-1496). 2524 (percentil 90) rinde mejor todavía (94-98%,
+# +$0.22-0.33) pero con mucho menos volumen — 995 es el punto medio.
+PRESSURE_THRESHOLD = 995.0
 TRADE_SIZE = 2.0            # plata chica, a propósito — pedido explícito del usuario
 MIN_TRADE_USD = 2.0
 MAX_STAKE_USD = 3.0         # techo, por si algún día se agrega sizing — hoy TRADE_SIZE es fijo
