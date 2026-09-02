@@ -641,6 +641,15 @@ def create_dashboard(get_stats_fn, get_prices_fn, get_markets_fn=None, mode="PAP
         except Exception as e:
             return jsonify({"error": str(e)})
 
+    @app.route("/api/shadow-pressure-threshold-backtest")
+    def api_shadow_pressure_threshold_backtest():
+        """Ver ShadowLogger.get_pressure_threshold_backtest_report()."""
+        try:
+            from shadow_logger import get_shadow_logger
+            return jsonify(get_shadow_logger().get_pressure_threshold_backtest_report())
+        except Exception as e:
+            return jsonify({"error": str(e)})
+
     @app.route("/api/shadow-pressure-distribution")
     def api_shadow_pressure_distribution():
         """Ver ShadowLogger.get_pressure_distribution_report() — distribución

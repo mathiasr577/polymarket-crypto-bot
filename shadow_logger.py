@@ -1525,6 +1525,67 @@ class ShadowLogger:
             "pct_above_threshold": round(100 * sum(1 for v in vals if v >= 20) / n, 2),
         }
 
+    def get_pressure_threshold_backtest_report(self) -> dict:
+        """2-sep-2026: repite el split-half de get_pressure_distribution_report
+        pero con umbrales que SÍ dividen la distribución real (0, y los
+        percentiles 25/50/75/90/95 reales) — el backtest original probó
+        0/5/10/20/40, todos minúsculos frente al rango real (mediana 140,
+        p90 2524), así que nunca probó de verdad si la MAGNITUD de la
+        presión predice algo, solo "algo de señal" vs "cero señal"."""
+        if not self.conn:
+            return {}
+        try:
+            with self.conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute("""
+                    SELECT market_open_timestamp, twap_pressure_integral,
+                           polymarket_up_price, polymarket_down_price, actual_outcome
+                    FROM shadow_decisions
+                    WHERE actual_outcome IS NOT NULL AND polymarket_up_price IS NOT NULL
+                    ORDER BY market_open_timestamp ASC
+                """)
+                rows = cur.fetchall()
+        except Exception as e:
+            logger.error(f"get_pressure_threshold_backtest_report error: {e}")
+            return {}
+        if not rows:
+            return {"n": 0}
+
+        n = len(rows)
+        half = n // 2
+        first, second = rows[:half], rows[half:]
+
+        def eval_thresh(rows, thresh):
+            n_, wins_, net_ = 0, 0, 0.0
+            for r in rows:
+                val = r["twap_pressure_integral"]
+                if val is None or abs(val) < thresh:
+                    continue
+                side = "UP" if val > 0 else "DOWN"
+                price = r["polymarket_up_price"] if side == "UP" else r["polymarket_down_price"]
+                if not price or price <= 0 or price >= 1:
+                    continue
+                win = side == r["actual_outcome"]
+                fee = 0.07 * (1 - price)
+                pnl = ((1 - price) / price - fee) if win else -(1 + fee)
+                n_ += 1
+                wins_ += 1 if win else 0
+                net_ += pnl
+            return n_, wins_, net_
+
+        threshes = [0, 20, 140, 500, 995, 2524, 3920]
+        out = []
+        for th in threshes:
+            n1, w1, net1 = eval_thresh(first, th)
+            n2, w2, net2 = eval_thresh(second, th)
+            out.append({
+                "threshold": th,
+                "old_half": {"n": n1, "win_pct": round(100 * w1 / n1, 1) if n1 else None,
+                             "avg_pnl": round(net1 / n1, 4) if n1 else None},
+                "new_half": {"n": n2, "win_pct": round(100 * w2 / n2, 1) if n2 else None,
+                             "avg_pnl": round(net2 / n2, 4) if n2 else None},
+            })
+        return {"n_total": n, "by_threshold": out}
+
     def get_liquidity_by_hour_report(self) -> dict:
         """Lee market_liquidity_ticks (ver market_scanner.py, corre 24/7,
         solo con precio REAL de compra del CLOB — no el fallback de Gamma
