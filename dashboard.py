@@ -641,6 +641,17 @@ def create_dashboard(get_stats_fn, get_prices_fn, get_markets_fn=None, mode="PAP
         except Exception as e:
             return jsonify({"error": str(e)})
 
+    @app.route("/api/shadow-pressure-distribution")
+    def api_shadow_pressure_distribution():
+        """Ver ShadowLogger.get_pressure_distribution_report() — distribución
+        real de twap_pressure_integral, para chequear si PRESSURE_THRESHOLD
+        (pressure_bot.py) filtra algo de verdad en la práctica."""
+        try:
+            from shadow_logger import get_shadow_logger
+            return jsonify(get_shadow_logger().get_pressure_distribution_report())
+        except Exception as e:
+            return jsonify({"error": str(e)})
+
     @app.route("/api/shadow-liquidity-by-hour")
     def api_shadow_liquidity_by_hour():
         """Ver ShadowLogger.get_liquidity_by_hour_report() — proxy de

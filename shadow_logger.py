@@ -1486,6 +1486,45 @@ class ShadowLogger:
             "markets_no_outcome_yet": n_no_outcome,
         }
 
+    def get_pressure_distribution_report(self) -> dict:
+        """2-sep-2026: pressure_bot (ver pressure_bot.py) usa
+        twap_pressure_integral solo, con PRESSURE_THRESHOLD=20 — elegido
+        mirando win%/avg_pnl por umbral en un backtest anterior. Duda que
+        surgió viendo los primeros trades reales: los valores en vivo
+        (cientos a miles) parecen mucho más grandes que los umbrales
+        probados (0-40) — si es así, el umbral casi no filtra nada en la
+        práctica. Este reporte da la distribución real (percentiles del
+        valor absoluto) para confirmar o descartar eso con datos, no a
+        ojo."""
+        if not self.conn:
+            return {}
+        try:
+            with self.conn.cursor() as cur:
+                cur.execute("""
+                    SELECT abs(twap_pressure_integral) FROM shadow_decisions
+                    WHERE twap_pressure_integral IS NOT NULL AND twap_pressure_integral != 0
+                """)
+                vals = sorted(r[0] for r in cur.fetchall())
+        except Exception as e:
+            logger.error(f"get_pressure_distribution_report error: {e}")
+            return {}
+        if not vals:
+            return {"n": 0}
+        n = len(vals)
+        percentiles = {}
+        for p in (1, 5, 10, 25, 50, 75, 90, 95, 99):
+            idx = min(int(n * p / 100), n - 1)
+            percentiles[f"p{p}"] = round(vals[idx], 2)
+        return {
+            "n": n,
+            "min": round(vals[0], 2),
+            "max": round(vals[-1], 2),
+            "mean": round(statistics.mean(vals), 2),
+            "percentiles": percentiles,
+            "current_threshold": 20,
+            "pct_above_threshold": round(100 * sum(1 for v in vals if v >= 20) / n, 2),
+        }
+
     def get_liquidity_by_hour_report(self) -> dict:
         """Lee market_liquidity_ticks (ver market_scanner.py, corre 24/7,
         solo con precio REAL de compra del CLOB — no el fallback de Gamma
