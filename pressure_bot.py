@@ -56,6 +56,20 @@ PRESSURE_ENABLED = os.environ.get("PRESSURE_BOT_ENABLED", "false").lower() == "t
 # (n=935-1496). 2524 (percentil 90) rinde mejor todavía (94-98%,
 # +$0.22-0.33) pero con mucho menos volumen — 995 es el punto medio.
 PRESSURE_THRESHOLD = 995.0
+
+# Agregado (2-sep-2026, mismo día): el 90.1-90.8% de acierto validado
+# arriba era el promedio de TODA la banda 0.50-0.99 — nunca se sub-dividió
+# por precio antes de arrancar (mismo error que en su momento con
+# favorite, corregido ahí, repetido acá sin querer). Los primeros trades
+# reales con el umbral 995 entraron casi todos en 0.83-0.98 (mediana
+# 0.94) y el día cerró en -$0.28 pese a 89.7% de acierto — la típica
+# trampa de "muchas ganancias chiquitas, una pérdida se las come todas".
+# Revisando por rango de precio (n=2481, señales que ya superan 995):
+# <0.50 -> 88.3% acierto, +$0.857/$1; 0.50-0.75 -> 82.5%, +$0.403/$1;
+# TODO lo de 0.75 para arriba -> entre -$0.024 y +$0.020/$1, ruido. El
+# edge real de esta señal vive por debajo de 0.75; arriba es donde
+# justo entraron casi todos los trades reales de hoy. Se corta ahí.
+PRESSURE_MAX_PRICE = 0.75
 TRADE_SIZE = 2.0            # plata chica, a propósito — pedido explícito del usuario
 MIN_TRADE_USD = 2.0
 MAX_STAKE_USD = 3.0         # techo, por si algún día se agrega sizing — hoy TRADE_SIZE es fijo
@@ -249,6 +263,8 @@ class PressureBot:
         tokens = market.get("tokens") or {}
         token_id = tokens.get(side)
         if not price or not token_id:
+            return
+        if price >= PRESSURE_MAX_PRICE:
             return
 
         threading.Thread(
