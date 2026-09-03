@@ -46,8 +46,14 @@ logger = logging.getLogger(__name__)
 FADE_ENABLED = os.environ.get("FADE_BOT_ENABLED", "false").lower() == "true"
 
 FADE_MIN_FAVORITE_PRICE = 0.95  # apostar al lado contrario cuando el otro esté a esto o más
-TRADE_SIZE = 0.20               # chico a propósito — ver docstring, la frecuencia es alta
-MIN_TRADE_USD = 0.20
+# 3-sep-2026 (arreglado ANTES de prender esto, encontrado con pressure_bot):
+# Polymarket exige mínimo 5 shares por orden. El peor caso acá es cuando
+# el favorito está justo en 0.95 (el lado que apostamos queda a ~0.05) —
+# a $0.20 eso da 4 shares, por debajo del mínimo. Subido a $0.30 para
+# que incluso en ese peor caso haya margen (6 shares).
+TRADE_SIZE = 0.30
+MIN_TRADE_USD = 0.30
+MIN_SHARES = 5.5  # chequeo previo, margen sobre el mínimo real de Polymarket (5)
 DAILY_LOSS_LIMIT_USD = 10.0     # esperar rachas largas de pérdidas es NORMAL acá, no un bug
 MAX_OPEN_POSITIONS = 1
 
@@ -244,6 +250,12 @@ class FadeFavoriteBot:
         tokens = market.get("tokens") or {}
         token_id = tokens.get(side)
         if not price or not token_id:
+            return
+
+        # Polymarket exige mínimo 5 shares por orden (encontrado en producción
+        # con pressure_bot: "Size (X) lower than the minimum: 5"). Chequeo
+        # previo para no intentar una orden que sabemos que va a rechazar.
+        if (TRADE_SIZE / price) < MIN_SHARES:
             return
 
         threading.Thread(

@@ -69,11 +69,23 @@ PRESSURE_THRESHOLD = 995.0
 # TODO lo de 0.75 para arriba -> entre -$0.024 y +$0.020/$1, ruido. El
 # edge real de esta señal vive por debajo de 0.75; arriba es donde
 # justo entraron casi todos los trades reales de hoy. Se corta ahí.
+# 3-sep-2026: encontrado en logs que muchas órdenes fallaban con "Size X
+# lower than the minimum: 5" — Polymarket exige un mínimo de 5 SHARES por
+# orden (no dólares), y con TRADE_SIZE=$2, shares=$2/precio queda por
+# debajo de 5 en gran parte del rango 0-0.75 (ej. a precio 0.75,
+# shares=2.67). Algunas órdenes pasaban igual (parece depender del
+# mercado/momento puntual, no se pudo aislar la regla exacta) pero
+# muchas fallaban en silencio — el arreglo del 2-sep nunca tuvo una
+# prueba limpia el 3-sep por esto. Subido a $5 para que incluso en el
+# peor caso (precio justo en el techo, 0.75) haya margen cómodo por
+# encima de 5 shares (6.67), no al filo.
 PRESSURE_MAX_PRICE = 0.75
-TRADE_SIZE = 2.0            # plata chica, a propósito — pedido explícito del usuario
-MIN_TRADE_USD = 2.0
-MAX_STAKE_USD = 3.0         # techo, por si algún día se agrega sizing — hoy TRADE_SIZE es fijo
-DAILY_LOSS_LIMIT_USD = 10.0 # freno propio, escala chica acorde al tamaño de apuesta
+TRADE_SIZE = 5.0
+MIN_TRADE_USD = 5.0
+MAX_STAKE_USD = 5.0         # techo, por si algún día se agrega sizing — hoy TRADE_SIZE es fijo
+MIN_SHARES = 5.5            # chequeo previo, margen sobre el mínimo real de Polymarket (5) —
+                             # evita ni intentar una orden que sabemos que va a rebotar
+DAILY_LOSS_LIMIT_USD = 20.0 # subido junto con TRADE_SIZE, misma tolerancia relativa que antes
 MAX_OPEN_POSITIONS = 1      # simple a propósito
 
 ET_OFFSET = timedelta(hours=-4)
@@ -265,6 +277,8 @@ class PressureBot:
         if not price or not token_id:
             return
         if price >= PRESSURE_MAX_PRICE:
+            return
+        if (TRADE_SIZE / price) < MIN_SHARES:
             return
 
         threading.Thread(
