@@ -58,6 +58,10 @@ if config.SHADOW_MODE_ENABLED:
 # aparte del bot principal (que sigue pausado). Ver pressure_bot.py.
 from pressure_bot import PRESSURE_ENABLED, get_pressure_bot
 
+# Otro bot chico y separado, "fade al favorito extremo" — ver
+# fade_favorite_bot.py. Apagado hasta que el usuario decida prenderlo.
+from fade_favorite_bot import FADE_ENABLED, get_fade_bot
+
 # Delta mínimo del activo correlacionado para contar como confirmación cruzada
 CROSS_ASSET_MIN_DELTA = 0.0003
 
@@ -150,6 +154,7 @@ def trading_loop():
     kalshi = get_kalshi_feed() if config.SHADOW_MODE_ENABLED else None
     book_feed = get_book_feed() if config.SHADOW_MODE_ENABLED else None
     pressure_bot = get_pressure_bot() if PRESSURE_ENABLED else None
+    fade_bot = get_fade_bot() if FADE_ENABLED else None
 
     mode_desc = "LIVE-v1" if live else ("LIVE-v2" if live_v2 else "PAPER")
     if live and live_v2:
@@ -159,7 +164,7 @@ def trading_loop():
 
     while True:
         try:
-            _tick(scanner, feed, paper, live, shadow, chainlink, paper_v2, order_flow, live_v2, kalshi, book_feed, pressure_bot)
+            _tick(scanner, feed, paper, live, shadow, chainlink, paper_v2, order_flow, live_v2, kalshi, book_feed, pressure_bot, fade_bot)
         except Exception as e:
             logger.error(f"Tick error: {e}")
         time.sleep(10)
@@ -187,7 +192,7 @@ def _cross_asset_confirm(feed, asset: str) -> str | None:
     return None
 
 
-def _tick(scanner, feed, paper, live, shadow=None, chainlink=None, paper_v2=None, order_flow=None, live_v2=None, kalshi=None, book_feed=None, pressure_bot=None):
+def _tick(scanner, feed, paper, live, shadow=None, chainlink=None, paper_v2=None, order_flow=None, live_v2=None, kalshi=None, book_feed=None, pressure_bot=None, fade_bot=None):
     resolve_expired(paper)
 
     if paper_v2:
@@ -195,6 +200,9 @@ def _tick(scanner, feed, paper, live, shadow=None, chainlink=None, paper_v2=None
 
     if pressure_bot:
         resolve_expired(pressure_bot)  # misma función genérica
+
+    if fade_bot:
+        resolve_expired(fade_bot)  # misma función genérica
 
     if shadow and chainlink:
         try:
@@ -260,6 +268,17 @@ def _tick(scanner, feed, paper, live, shadow=None, chainlink=None, paper_v2=None
             for tid in tokens_dict.values():
                 if tid:
                     book_tokens.add(tid)
+
+        if fade_bot:
+            # Mismo horario que pressure_bot — ver comentario de más abajo.
+            # No depende de chainlink/TWAP para nada, solo del precio de
+            # mercado directo, así que se evalúa acá sin esperar ese bloque.
+            _hour_utc = datetime.now(timezone.utc).hour
+            if config.TRADING_START_UTC <= _hour_utc < config.TRADING_END_UTC:
+                try:
+                    fade_bot.evaluate(market)
+                except Exception as e:
+                    logger.debug(f"fade_bot.evaluate error [{asset}]: {e}")
 
         # v2 (TWAP + bandas de precio) y el shadow-logger NO dependen del
         # feed de Kraken para nada — evaluarlos acá, ANTES de los checks de
@@ -556,6 +575,8 @@ def get_combined_stats():
         base["paper_v2"] = get_trader_v2().get_stats()
     if PRESSURE_ENABLED:
         base["pressure_bot"] = get_pressure_bot().get_stats()
+    if FADE_ENABLED:
+        base["fade_bot"] = get_fade_bot().get_stats()
     return base
 
 

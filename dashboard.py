@@ -200,6 +200,51 @@ HTML = """
 </div>
 {% endif %}
 
+{% if stats.fade_bot is defined %}
+<div class="section">
+  <h2>🟠 Fade Favorite Bot (apuesta al lado improbable cuando el otro está a 0.95+ — plata real chica)</h2>
+  <div class="grid">
+    <div class="card">
+      <div class="label">Balance</div>
+      <div class="value purple">${{ "%.2f"|format(stats.fade_bot.balance) }}</div>
+    </div>
+    <div class="card">
+      <div class="label">P&L hoy</div>
+      <div class="value {{ 'green' if stats.fade_bot.today_pnl >= 0 else 'red' }}">${{ "%+.2f"|format(stats.fade_bot.today_pnl) }}</div>
+      <div class="sublabel">Total: ${{ "%+.2f"|format(stats.fade_bot.total_pnl) }}</div>
+    </div>
+    <div class="card">
+      <div class="label">Win rate</div>
+      <div class="value">{{ "%.1f"|format(stats.fade_bot.win_rate) }}%</div>
+      <div class="sublabel">{{ stats.fade_bot.wins }}W / {{ stats.fade_bot.losses }}L</div>
+    </div>
+    <div class="card">
+      <div class="label">Estado</div>
+      <div class="value {{ 'red' if stats.fade_bot.drawdown_paused else 'green' }}">
+        {{ 'Pausado' if stats.fade_bot.drawdown_paused else 'Activo' }}
+      </div>
+      <div class="sublabel">{{ stats.fade_bot.open_count }} abierta(s) · {{ stats.fade_bot.completed }} trades totales</div>
+    </div>
+  </div>
+  {% if stats.fade_bot.recent_trades %}
+  <div class="divider"></div>
+  <table>
+    <tr><th>Asset</th><th>Lado</th><th>Precio</th><th>Favorito era</th><th>Resultado</th><th>PnL</th></tr>
+    {% for t in stats.fade_bot.recent_trades %}
+    <tr>
+      <td>{{ t.asset }}</td>
+      <td>{{ t.side }}</td>
+      <td>{{ "%.3f"|format(t.price) if t.price else '-' }}</td>
+      <td>{{ "%.2f"|format(t.favorite_price_at_entry) if t.favorite_price_at_entry else '-' }}</td>
+      <td class="{{ 'green' if t.win else 'red' }}">{{ 'GANÓ' if t.win else 'perdió' }}</td>
+      <td class="{{ 'green' if t.pnl and t.pnl >= 0 else 'red' }}">${{ "%+.2f"|format(t.pnl) if t.pnl is not none else '-' }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% endif %}
+</div>
+{% endif %}
+
 {% if stats.pressure_bot is defined %}
 <div class="section">
   <h2>🌡️ Pressure Bot (señal de presión sola — plata real chica, separado del bot principal)</h2>
