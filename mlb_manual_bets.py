@@ -1,47 +1,65 @@
 """
-Compra manual de 3 mercados de MLB — un disparo único, elegido a mano
-hoy (3-sep-2026). NO es parte de ningún bot automático y NO se corre
-solo: lo tenés que ejecutar VOS desde tu terminal.
+Compra manual de 3 mercados de MLB — 5-sep-2026, $40 c/u.
 
-Los 3 elegidos (mayor probabilidad implícita de la cartelera del
-4-sep, sacados en vivo de gamma-api.polymarket.com):
-  - Pirates  (65%) vs Angels    | 4-sep 6:45 PM ET
-  - Mets     (64%) vs Giants    | 4-sep 7:10 PM ET
-  - Dodgers  (74%) vs Nationals | 4-sep 10:10 PM ET
+Esta vez el criterio no es solo precio de Polymarket: para cada
+partido cruzo el precio de mercado contra el abridor probable de cada
+equipo (récord/ERA de temporada, sacado de MLB.com hoy). Los 3
+elegidos son los que tienen la MAYOR probabilidad de mercado Y el
+mismatch de pitcheo más claro en la misma dirección — cuando ambas
+señales apuntan al mismo lado, hay más razón para confiar que cuando
+es solo el precio.
 
-Uso (desde este directorio, que ya está linkeado a Railway):
-    railway run python3 mlb_manual_bets.py            # dry-run, no manda nada
-    railway run python3 mlb_manual_bets.py --live      # ejecuta de verdad, plata real
+  1. Pirates (64%) vs Angels
+     Braxton Ashcraft (14-5, 3.59 ERA) vs Yusei Kikuchi (0-5, 5.65 ERA)
+     -> mismatch de pitcheo enorme, en la misma dirección que el mercado.
 
-`railway run` inyecta PRIVATE_KEY/FUNDER del servicio sin que tengas
-que exportarlos a mano. Corré primero SIN --live para ver qué haría.
+  2. Dodgers (65%) vs Nationals
+     Tyler Glasnow (4-0, 2.79 ERA) vs Cade Cavalli (12-5, 3.12 ERA)
+     -> Glasnow tiene el mejor ERA de los 6 abridores de hoy, más el
+     peso de la franquicia Dodgers. Cavalli también es sólido, pero
+     no alcanza.
 
-Los precios de referencia son los que estaban en el libro cuando arme
-esto — si se movieron mucho para cuando corras esto, el margen de
-slippage (3%, mismo que usa el resto del bot) puede no alcanzar y la
-orden simplemente no se llena (no paga de más silenciosamente).
+  3. Mariners (68%) vs Athletics
+     George Kirby (9-10, 4.19 ERA) vs Jeffrey Springs (3-13, 6.37 ERA)
+     -> Springs es el peor abridor de la lista de hoy por lejos.
+
+Descartados a propósito por CONTRADECIR el precio de mercado (serían
+apuestas de "valor" especulativo, no las seguras que pediste):
+  - Rays @ Rangers: Rasmussen (14-5, 2.95) es claramente mejor que
+    deGrom (10-9, 4.00) pero el mercado favorece a Rangers 52%. Señal
+    mixta, se deja afuera.
+  - D-backs @ Astros: Pfaadt (7-2, 3.49) domina a Pecko (1-0, 6.23,
+    apenas 1 salida) pero el mercado lo tiene 51/50. Podría ser valor
+    real, pero no es una apuesta "segura" — se deja afuera a propósito.
+
+Uso (desde este directorio, linkeado a Railway):
+    railway ssh -- python3 mlb_manual_bets.py            # dry-run
+    railway ssh -- python3 mlb_manual_bets.py --live      # plata real
+
+Corré esto vos, no se dispara solo. Usar railway ssh (no railway run)
+porque la IP residencial da 403 geoblock — la de Railway EU West no.
 """
 import sys
 import time
 from order_executor import place_order
 
-STAKE_USD = 30.0
+STAKE_USD = 40.0
 
 BETS = [
     {
-        "label": "Angels vs. Pirates (4-sep 6:45PM ET) -> PIRATES",
-        "token_id": "43797855474710463342539060080918268666012118245871428808651866780360879877284",
-        "ref_price": 0.645,
-    },
-    {
-        "label": "Giants vs. Mets (4-sep 7:10PM ET) -> METS",
-        "token_id": "10333160508521593657175826571699847556632864581503617955746824827412179308362",
+        "label": "Angels vs. Pirates (5-sep 6:40PM ET) -> PIRATES  [Ashcraft 3.59 ERA vs Kikuchi 5.65 ERA]",
+        "token_id": "111113894891170594394149079773916491591885380177813538143106329660202794558400",
         "ref_price": 0.635,
     },
     {
-        "label": "Nationals vs. Dodgers (4-sep 10:10PM ET) -> DODGERS",
-        "token_id": "23450853163862604024762059009323548949257870053052451419800797889700808979874",
-        "ref_price": 0.735,
+        "label": "Nationals vs. Dodgers (5-sep 9:10PM ET) -> DODGERS  [Glasnow 2.79 ERA vs Cavalli 3.12 ERA]",
+        "token_id": "99866995184257910609148611344011582187394703370527940150087404254207359792772",
+        "ref_price": 0.645,
+    },
+    {
+        "label": "Athletics vs. Mariners (5-sep 9:40PM ET) -> MARINERS  [Kirby 4.19 ERA vs Springs 6.37 ERA]",
+        "token_id": "43507198494641002372671746028295196331127705437890934926162041212287067862674",
+        "ref_price": 0.675,
     },
 ]
 
