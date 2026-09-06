@@ -1,65 +1,62 @@
 """
-Compra manual de 3 mercados de MLB — 5-sep-2026, $40 c/u.
+Compra manual de 3 mercados de MLB — 6-sep-2026, $35 c/u.
 
-Esta vez el criterio no es solo precio de Polymarket: para cada
-partido cruzo el precio de mercado contra el abridor probable de cada
-equipo (récord/ERA de temporada, sacado de MLB.com hoy). Los 3
-elegidos son los que tienen la MAYOR probabilidad de mercado Y el
-mismatch de pitcheo más claro en la misma dirección — cuando ambas
-señales apuntan al mismo lado, hay más razón para confiar que cuando
-es solo el precio.
+Mismo método que el 5-sep (precio de mercado + abridor probable real,
+ERA y récord de temporada, sacado de MLB.com hoy), con un filtro extra
+que ayer no apliqué con suficiente cuidado: prioricé los partidos
+donde el mercado y el pitcheo apuntan en la MISMA dirección con el
+mayor margen posible, y descarté cualquier caso con muestra chica
+(pitchers con 0-1 decisiones) porque esos ERA no dicen mucho todavía.
 
-  1. Pirates (64%) vs Angels
-     Braxton Ashcraft (14-5, 3.59 ERA) vs Yusei Kikuchi (0-5, 5.65 ERA)
-     -> mismatch de pitcheo enorme, en la misma dirección que el mercado.
+  1. Guardians (61.5%) vs Tigers
+     Gavin Williams (13-7, 3.81 ERA) vs Jackson Jobe (1-2, 4.63 ERA)
+     -> Williams tiene 13 victorias en la temporada, récord y ERA
+     mejores por lejos que un abridor con apenas 3 decisiones.
 
-  2. Dodgers (65%) vs Nationals
-     Tyler Glasnow (4-0, 2.79 ERA) vs Cade Cavalli (12-5, 3.12 ERA)
-     -> Glasnow tiene el mejor ERA de los 6 abridores de hoy, más el
-     peso de la franquicia Dodgers. Cavalli también es sólido, pero
-     no alcanza.
+  2. Mariners (64.5%) vs Athletics
+     Bryan Woo (10-9, 4.25 ERA) vs Gage Jump (6-9, 5.15 ERA)
+     -> mismo tipo de mismatch que el 5-sep (esa perdimos — es una
+     apuesta distinta, con otros abridores, no "revancha").
 
-  3. Mariners (68%) vs Athletics
-     George Kirby (9-10, 4.19 ERA) vs Jeffrey Springs (3-13, 6.37 ERA)
-     -> Springs es el peor abridor de la lista de hoy por lejos.
+  3. Dodgers (64.5%) vs Nationals
+     Justin Wrobleski (11-5, 3.65 ERA) vs Andrew Alvarez (2-6, 3.47 ERA)
+     -> acá el ERA es parejo, pero el récord (11-5 vs 2-6) y la fuerza
+     general del equipo Dodgers son la base real de esta, no el ERA
+     solo — igual que la del 5-sep, que sí ganamos.
 
-Descartados a propósito por CONTRADECIR el precio de mercado (serían
-apuestas de "valor" especulativo, no las seguras que pediste):
-  - Rays @ Rangers: Rasmussen (14-5, 2.95) es claramente mejor que
-    deGrom (10-9, 4.00) pero el mercado favorece a Rangers 52%. Señal
-    mixta, se deja afuera.
-  - D-backs @ Astros: Pfaadt (7-2, 3.49) domina a Pecko (1-0, 6.23,
-    apenas 1 salida) pero el mercado lo tiene 51/50. Podría ser valor
-    real, pero no es una apuesta "segura" — se deja afuera a propósito.
+Descartados a propósito por señal mixta o muestra chica:
+  - Braves @ Phillies: ERA parejo, mercado 50/51 — coinflip real.
+  - Giants @ Mets: el abridor de Giants tiene mejor ERA (2.25) pero
+    CERO decisiones en la temporada — muestra insuficiente.
+  - D-backs @ Astros: Eduardo Rodríguez (14-5, 2.59 ERA, el mejor
+    abridor de HOY) pero el mercado tiene esto 50/51 — el mercado no
+    lo acompaña, sería una apuesta de "valor" especulativo, no segura.
 
 Uso (desde este directorio, linkeado a Railway):
     railway ssh -- python3 mlb_manual_bets.py            # dry-run
     railway ssh -- python3 mlb_manual_bets.py --live      # plata real
-
-Corré esto vos, no se dispara solo. Usar railway ssh (no railway run)
-porque la IP residencial da 403 geoblock — la de Railway EU West no.
 """
 import sys
 import time
 from order_executor import place_order
 
-STAKE_USD = 40.0
+STAKE_USD = 35.0
 
 BETS = [
     {
-        "label": "Angels vs. Pirates (5-sep 6:40PM ET) -> PIRATES  [Ashcraft 3.59 ERA vs Kikuchi 5.65 ERA]",
-        "token_id": "111113894891170594394149079773916491591885380177813538143106329660202794558400",
-        "ref_price": 0.635,
+        "label": "Tigers vs. Guardians (6-sep 1:40PM ET) -> GUARDIANS  [Williams 3.81 ERA, 13-7 vs Jobe 4.63 ERA, 1-2]",
+        "token_id": "15625999509797276893820228747122054491128791147014300727249978943863135689919",
+        "ref_price": 0.615,
     },
     {
-        "label": "Nationals vs. Dodgers (5-sep 9:10PM ET) -> DODGERS  [Glasnow 2.79 ERA vs Cavalli 3.12 ERA]",
-        "token_id": "99866995184257910609148611344011582187394703370527940150087404254207359792772",
+        "label": "Athletics vs. Mariners (6-sep 4:10PM ET) -> MARINERS  [Woo 4.25 ERA vs Jump 5.15 ERA]",
+        "token_id": "40145216935047072679618812220967389587237342261367356792779848965121234822271",
         "ref_price": 0.645,
     },
     {
-        "label": "Athletics vs. Mariners (5-sep 9:40PM ET) -> MARINERS  [Kirby 4.19 ERA vs Springs 6.37 ERA]",
-        "token_id": "43507198494641002372671746028295196331127705437890934926162041212287067862674",
-        "ref_price": 0.675,
+        "label": "Nationals vs. Dodgers (6-sep 10:10PM ET) -> DODGERS  [Wrobleski 11-5 vs Alvarez 2-6]",
+        "token_id": "101279472385609715829438473394947480656628050512671135483131814465078673073731",
+        "ref_price": 0.645,
     },
 ]
 
