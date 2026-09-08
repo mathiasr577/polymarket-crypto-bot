@@ -1,36 +1,52 @@
 """
-Compra manual de 3 mercados de MLB — 6-sep-2026, $35 c/u.
+Compra manual de 3 mercados de MLB — 8-sep-2026 (noche), $45 c/u.
 
-Mismo método que el 5-sep (precio de mercado + abridor probable real,
-ERA y récord de temporada, sacado de MLB.com hoy), con un filtro extra
-que ayer no apliqué con suficiente cuidado: prioricé los partidos
-donde el mercado y el pitcheo apuntan en la MISMA dirección con el
-mayor margen posible, y descarté cualquier caso con muestra chica
-(pitchers con 0-1 decisiones) porque esos ERA no dicen mucho todavía.
+Re-verificado a las 5PM ET del mismo día del partido: mismos 3
+abridores confirmados (sin cambios), precios de mercado casi
+idénticos a los de anoche, y una noticia extra a favor de Yankees
+(Aaron Judge vuelve a la alineación hoy tras 3 meses lesionado —
+refuerza más el pick ya más fuerte de los 3). Único dato negativo
+menor: Marlins perdió a Kyle Stowers (IL, isquiotibial) — no cambia
+la apuesta pero es la más floja de las 3 igual (52%, la más ajustada).
 
-  1. Guardians (61.5%) vs Tigers
-     Gavin Williams (13-7, 3.81 ERA) vs Jackson Jobe (1-2, 4.63 ERA)
-     -> Williams tiene 13 victorias en la temporada, récord y ERA
-     mejores por lejos que un abridor con apenas 3 decisiones.
+Esta vez sumé un dato que no había usado antes: el RÉCORD GENERAL del
+equipo en la temporada (via ESPN), no solo el abridor de hoy. Elegí
+los 3 donde las TRES señales (récord del equipo, ERA/récord del
+abridor, y precio de mercado) apuntan al mismo lado con el mayor
+margen — no solo dos de tres como en rondas anteriores.
 
-  2. Mariners (64.5%) vs Athletics
-     Bryan Woo (10-9, 4.25 ERA) vs Gage Jump (6-9, 5.15 ERA)
-     -> mismo tipo de mismatch que el 5-sep (esa perdimos — es una
-     apuesta distinta, con otros abridores, no "revancha").
+  1. Yankees (75%) vs Rockies
+     Equipo: NYY 81-62 vs COL 55-88 (26 juegos de diferencia)
+     Abridor: Schlittler (12-6, 2.04 ERA — el mejor ERA de TODA la
+     cartelera de hoy) vs Hughes (0-6, 6.19 ERA — un desastre)
+     -> las tres señales alineadas y con el margen más grande de la
+     noche. La apuesta más sólida de las 3.
 
-  3. Dodgers (64.5%) vs Nationals
-     Justin Wrobleski (11-5, 3.65 ERA) vs Andrew Alvarez (2-6, 3.47 ERA)
-     -> acá el ERA es parejo, pero el récord (11-5 vs 2-6) y la fuerza
-     general del equipo Dodgers son la base real de esta, no el ERA
-     solo — igual que la del 5-sep, que sí ganamos.
+  2. Brewers (66%) vs Cubs
+     Equipo: MIL 89-56 (el mejor récord de toda la liga hoy) vs
+     CHC 81-64
+     Abridor: Misiorowski (14-5, 1.97 ERA — el SEGUNDO mejor ERA de
+     la cartelera) vs Peterson (7-8, 5.39 ERA)
+     -> mismo patrón: equipo, abridor y mercado alineados.
 
-Descartados a propósito por señal mixta o muestra chica:
-  - Braves @ Phillies: ERA parejo, mercado 50/51 — coinflip real.
-  - Giants @ Mets: el abridor de Giants tiene mejor ERA (2.25) pero
-    CERO decisiones en la temporada — muestra insuficiente.
-  - D-backs @ Astros: Eduardo Rodríguez (14-5, 2.59 ERA, el mejor
-    abridor de HOY) pero el mercado tiene esto 50/51 — el mercado no
-    lo acompaña, sería una apuesta de "valor" especulativo, no segura.
+  3. Marlins (55%) vs Mets
+     Equipo: MIA 72-73 vs NYM 66-78
+     Abridor: Alcantará (13-9, 3.54 ERA, número de victorias más alto
+     de este trío) vs Manaea (4-7, 4.70 ERA)
+     -> el mercado acá es más ajustado (55%) que las otras dos, pero
+     las tres señales igual apuntan para el mismo lado.
+
+Descartados a propósito por señal mixta o dato insuficiente:
+  - Astros @ Phillies: el abridor de Houston es mejor (3.18 vs 5.55
+    ERA) pero el EQUIPO Philadelphia es mucho mejor (81-63 vs 73-71)
+    y el mercado los favorece — señales en direcciones opuestas.
+  - Angels @ Red Sox: el abridor de Angels (Detmers, 3.44 ERA) es
+    mejor que el de Boston (Sandoval, 4.41 ERA), pero el EQUIPO Boston
+    es muchísimo mejor (80-65 vs 54-90) — misma contradicción.
+  - D-backs @ Royals: buen récord de equipo para Arizona (77-68 vs
+    64-81) pero no hay ERA/récord publicado todavía para su abridor
+    (Burnes) — dato insuficiente, y el mercado lo tiene casi 50/50 de
+    todos modos.
 
 Uso (desde este directorio, linkeado a Railway):
     railway ssh -- python3 mlb_manual_bets.py            # dry-run
@@ -40,23 +56,23 @@ import sys
 import time
 from order_executor import place_order
 
-STAKE_USD = 35.0
+STAKE_USD = 45.0
 
 BETS = [
     {
-        "label": "Tigers vs. Guardians (6-sep 1:40PM ET) -> GUARDIANS  [Williams 3.81 ERA, 13-7 vs Jobe 4.63 ERA, 1-2]",
-        "token_id": "15625999509797276893820228747122054491128791147014300727249978943863135689919",
-        "ref_price": 0.615,
+        "label": "Rockies vs. Yankees (8-sep 11:05PM ET) -> YANKEES  [Schlittler 2.04 ERA, 12-6 vs Hughes 6.19 ERA, 0-6 | equipo 81-62 vs 55-88 | +Judge vuelve hoy]",
+        "token_id": "88149961926978287782196780314449628985118065203658161345636243514846352878820",
+        "ref_price": 0.76,
     },
     {
-        "label": "Athletics vs. Mariners (6-sep 4:10PM ET) -> MARINERS  [Woo 4.25 ERA vs Jump 5.15 ERA]",
-        "token_id": "40145216935047072679618812220967389587237342261367356792779848965121234822271",
-        "ref_price": 0.645,
+        "label": "Cubs vs. Brewers (8-sep 11:40PM ET) -> BREWERS  [Misiorowski 1.97 ERA, 14-5 vs Peterson 5.39 ERA | equipo 89-56 vs 81-64]",
+        "token_id": "20132959382596203032910164842937952852490220949031243736381111143354467768294",
+        "ref_price": 0.66,
     },
     {
-        "label": "Nationals vs. Dodgers (6-sep 10:10PM ET) -> DODGERS  [Wrobleski 11-5 vs Alvarez 2-6]",
-        "token_id": "101279472385609715829438473394947480656628050512671135483131814465078673073731",
-        "ref_price": 0.645,
+        "label": "Mets vs. Marlins (8-sep 10:40PM ET) -> MARLINS  [Alcantara 3.54 ERA, 13-9 vs Manaea 4.70 ERA | equipo 72-73 vs 66-78 | -Stowers IL]",
+        "token_id": "100402930733517859553033568487421284989702898538143745066977613006030392716081",
+        "ref_price": 0.52,
     },
 ]
 
