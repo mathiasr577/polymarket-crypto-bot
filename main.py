@@ -48,6 +48,12 @@ if config.SHADOW_MODE_ENABLED:
 if config.SHADOW_MODE_ENABLED:
     from kalshi_feed import start_kalshi_feed, get_kalshi_feed
 
+# 9-sep-2026: rastreo prospectivo de "wallets a copiar" en CUALQUIER
+# mercado de Polymarket (no solo BTC/ETH) — ver wallet_copy_feed.py.
+# Solo lectura/logging, no ejecuta ninguna orden real todavía.
+if config.SHADOW_MODE_ENABLED:
+    from wallet_copy_feed import start_wallet_copy_feed, get_wallet_copy_feed
+
 # Libro de órdenes real de Polymarket — shadow-only, alimenta la
 # descomposición de ejecución de favorite (delay de 250ms/spread/fee).
 # Ver polymarket_book_feed.py.
@@ -646,6 +652,7 @@ def main():
         start_order_flow_feed()
         start_kalshi_feed()
         start_book_feed()
+        start_wallet_copy_feed(get_shadow_logger())
 
     t = threading.Thread(target=trading_loop, daemon=True)
     t.start()
