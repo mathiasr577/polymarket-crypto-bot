@@ -33,8 +33,16 @@ logger = logging.getLogger(__name__)
 
 BASE = "https://api.elections.kalshi.com/trade-api/v2"
 SERIES_MAP = {"bitcoin": "KXBTC15M", "ethereum": "KXETH15M"}
-POLL_INTERVAL_SEC = 10
-STALE_THRESHOLD_SEC = 60  # 6 polls perdidos seguidos
+# 9-sep-2026: bajado de 10s a 2s para el experimento de cancelación
+# (mensaje_otra_ia_6.md) — a 10s, Kalshi estructuralmente no puede avisar
+# a tiempo de nada que se resuelva en un par de segundos, sin importar
+# qué tan bien se implemente el resto. Con todo, esto sigue siendo un
+# límite real: la API de Kalshi no expone un timestamp propio del precio
+# (solo close_time del mercado), así que `fetched_at` (hora local del
+# poll) es la mejor resolución posible — el dato puede tener hasta
+# ~POLL_INTERVAL_SEC de antigüedad real en el peor caso.
+POLL_INTERVAL_SEC = 2
+STALE_THRESHOLD_SEC = 20  # 10 polls perdidos seguidos (ajustado junto con el intervalo)
 
 
 def _parse_ts(s: str) -> datetime:

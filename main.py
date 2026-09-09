@@ -469,7 +469,7 @@ BOOK_SNAPSHOT_INTERVAL_SEC = 3
 BOOK_SNAPSHOT_RESOLVE_EVERY_N = 10  # cada ~30s, no en cada foto — ahorra pegarle a Gamma de más
 
 
-def _book_snapshot_loop(scanner, chainlink, order_flow, book_feed, shadow):
+def _book_snapshot_loop(scanner, chainlink, order_flow, book_feed, shadow, kalshi=None):
     """Loop propio, más rápido que trading_loop's ~10s — ver diseño del
     backtest de maker (1-sep-2026, conversación) y shadow_book_snapshots
     en shadow_logger.py. Corre para TODOS los mercados en ventana de
@@ -480,6 +480,7 @@ def _book_snapshot_loop(scanner, chainlink, order_flow, book_feed, shadow):
     no toca ninguna decisión de trading."""
     tick_n = 0
     trade_since_ts = {}  # token_id -> último ts drenado, ver shadow.log_trades
+    kalshi_maker_state = {}  # (market_id, side) -> estado, ver shadow.log_kalshi_maker_quotes
     while True:
         try:
             tick_n += 1
@@ -497,6 +498,16 @@ def _book_snapshot_loop(scanner, chainlink, order_flow, book_feed, shadow):
                     trade_since_ts = shadow.log_trades(market, book_feed, trade_since_ts)
                 except Exception as e:
                     logger.debug(f"log_trades error [{asset}]: {e}")
+
+                # Experimento de Kalshi-cancel (9-sep-2026, ver
+                # mensaje_otra_ia_6.md) — BTC únicamente, la función misma
+                # filtra por asset. Independiente del resto: no se quiere
+                # perder esto solo porque falte data de TWAP en un tick.
+                if kalshi is not None:
+                    try:
+                        kalshi_maker_state = shadow.log_kalshi_maker_quotes(market, book_feed, kalshi, kalshi_maker_state)
+                    except Exception as e:
+                        logger.debug(f"log_kalshi_maker_quotes error [{asset}]: {e}")
 
                 try:
                     snap = chainlink.get_snapshot(asset)
@@ -527,6 +538,10 @@ def _book_snapshot_loop(scanner, chainlink, order_flow, book_feed, shadow):
                     shadow.resolve_pending_book_snapshots()
                 except Exception as e:
                     logger.debug(f"resolve_pending_book_snapshots error: {e}")
+                try:
+                    shadow.resolve_pending_kalshi_maker_quotes()
+                except Exception as e:
+                    logger.debug(f"resolve_pending_kalshi_maker_quotes error: {e}")
         except Exception as e:
             logger.error(f"_book_snapshot_loop tick error: {e}")
 
@@ -620,7 +635,7 @@ def main():
     if config.SHADOW_MODE_ENABLED:
         t2 = threading.Thread(
             target=_book_snapshot_loop,
-            args=(get_scanner(), get_chainlink_feed(), get_order_flow_feed(), get_book_feed(), get_shadow_logger()),
+            args=(get_scanner(), get_chainlink_feed(), get_order_flow_feed(), get_book_feed(), get_shadow_logger(), get_kalshi_feed()),
             daemon=True,
         )
         t2.start()

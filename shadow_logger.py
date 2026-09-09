@@ -239,6 +239,47 @@ CREATE TABLE IF NOT EXISTS shadow_trade_tape (
     transaction_hash TEXT UNIQUE
 );
 CREATE INDEX IF NOT EXISTS idx_shadow_trade_tape_market ON shadow_trade_tape (market_id, ts);
+-- 9-sep-2026: timestamp propio del exchange (ms), separado de `ts` (hora
+-- local de recepción) — ver polymarket_book_feed.py. Necesario para el
+-- experimento de Kalshi-cancel: sin esto no se puede distinguir un lead
+-- real de una diferencia de relojes/latencia de red.
+ALTER TABLE shadow_trade_tape ADD COLUMN IF NOT EXISTS exchange_ts_ms BIGINT;
+
+-- 9-sep-2026: experimento prospectivo de cancelación con Kalshi (ver
+-- mensaje_otra_ia_5.md / mensaje_otra_ia_6.md) — logging puro, cero
+-- riesgo, no participa en ninguna decisión de trading. Simula, para
+-- cada mercado BTC y cada lado (UP/DOWN), una cotización pasiva que se
+-- re-precia al best_bid en cada foto (~3s, igual que shadow_book_snapshots)
+-- hasta que un trade real la cruza (mismo criterio de shadow_trade_tape:
+-- solo SELL cruza un BID) — en ese momento se congela el registro con el
+-- estado de Kalshi justo antes del cruce. La Etapa A (cancelación
+-- instantánea ficticia) se calcula DESPUÉS, sobre estos datos, eligiendo
+-- el umbral una sola vez — acá solo se guardan los ingredientes crudos.
+CREATE TABLE IF NOT EXISTS kalshi_maker_quotes (
+    id SERIAL PRIMARY KEY,
+    market_id TEXT,
+    side TEXT,                          -- 'UP' o 'DOWN'
+    quote_first_price FLOAT,
+    quote_last_price FLOAT,
+    quote_first_local_ts TIMESTAMPTZ,
+    quote_last_local_ts TIMESTAMPTZ,
+    n_ticks INT DEFAULT 1,
+    kalshi_yes_ask_last FLOAT,
+    kalshi_lean_last FLOAT,
+    kalshi_feed_connected_last BOOLEAN,
+    kalshi_local_ts_last TIMESTAMPTZ,   -- hora local del último poll de Kalshi visto
+    hit BOOLEAN DEFAULT FALSE,
+    hit_price FLOAT,
+    hit_local_ts TIMESTAMPTZ,
+    hit_exchange_ts_ms BIGINT,          -- del trade real que cruzó (Polymarket)
+    kalshi_yes_ask_at_hit FLOAT,
+    kalshi_lean_at_hit FLOAT,
+    kalshi_local_ts_at_hit TIMESTAMPTZ, -- hora local del poll de Kalshi más reciente ANTES del hit
+    resolved_at TIMESTAMPTZ,
+    actual_outcome TEXT,                -- 'UP' o 'DOWN', se llena al resolver
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_kalshi_maker_quotes_mkt_side ON kalshi_maker_quotes (market_id, side);
 """
 
 
@@ -526,12 +567,13 @@ class ShadowLogger:
                     for t in trades:
                         cur.execute("""
                             INSERT INTO shadow_trade_tape
-                            (market_id, asset, token_id, side, price, size, transaction_hash)
-                            VALUES (%s,%s,%s,%s,%s,%s,%s)
+                            (market_id, asset, token_id, side, price, size, transaction_hash, exchange_ts_ms)
+                            VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
                             ON CONFLICT (transaction_hash) DO NOTHING
                         """, (
                             str(market["id"]), market["asset"], token_id, t.get("side"),
                             _safe(t.get("price")), _safe(t.get("size")), t.get("tx_hash"),
+                            t.get("exchange_ts_ms"),
                         ))
             except Exception as e:
                 logger.debug(f"log_trades insert error [{token_id}]: {e}")
@@ -573,6 +615,129 @@ class ShadowLogger:
                     """, (outcome, market_id))
             except Exception as e:
                 logger.debug(f"Shadow resolve_pending_book_snapshots error {market_id}: {e}")
+
+    def log_kalshi_maker_quotes(self, market, book_feed, kalshi_feed, state: dict):
+        """Un tick del experimento de Kalshi-cancel (ver DDL de
+        kalshi_maker_quotes arriba) — se llama desde _book_snapshot_loop,
+        BTC únicamente. `state` es un dict que el caller guarda entre
+        llamadas: {(market_id, side): {'hit': bool, 'since_ts': float}} —
+        mismo espíritu que trade_since_ts en log_trades, para no
+        reprocesar trades ya vistos ni re-escribir una fila ya congelada.
+        Solo lectura/logging, no toca ninguna decisión de trading."""
+        if not self.conn or market.get("asset") != "bitcoin":
+            return state
+        tokens = market.get("tokens") or {}
+        up_token = tokens.get("UP")
+        down_token = tokens.get("DOWN")
+        kalshi_snap = kalshi_feed.get_snapshot("bitcoin") if kalshi_feed else {}
+        now_local = datetime.now(timezone.utc)
+
+        for side, token_id in (("UP", up_token), ("DOWN", down_token)):
+            if not token_id:
+                continue
+            key = (market["id"], side)
+            side_state = state.setdefault(key, {"hit": False, "since_ts": 0.0})
+            if side_state["hit"]:
+                continue  # ya se congeló esta cotización, nada más que hacer
+
+            book = book_feed.get_book(token_id)
+            level = book.get("best_bid")
+            if level is None:
+                continue
+
+            # ¿algún SELL real cruzó el nivel anterior desde el último tick?
+            # (mismo criterio que el backtest: solo SELL cruza un BID; >=1
+            # tick por debajo = certain_fill, no solo "tocó")
+            new_trades = book_feed.get_new_trades(token_id, side_state["since_ts"])
+            if new_trades:
+                side_state["since_ts"] = max(t["ts"] for t in new_trades)
+            prev_level = side_state.get("last_price", level)
+            crossing = [t for t in new_trades if t.get("side") == "SELL" and t["price"] <= prev_level - 0.01]
+
+            try:
+                with self.conn.cursor() as cur:
+                    if crossing:
+                        hit_trade = min(crossing, key=lambda t: t["price"])
+                        cur.execute("""
+                            UPDATE kalshi_maker_quotes
+                            SET hit=TRUE, hit_price=%s, hit_local_ts=%s, hit_exchange_ts_ms=%s,
+                                kalshi_yes_ask_at_hit=%s, kalshi_lean_at_hit=%s, kalshi_local_ts_at_hit=%s,
+                                updated_at=NOW()
+                            WHERE market_id=%s AND side=%s
+                        """, (
+                            prev_level, now_local, hit_trade.get("exchange_ts_ms"),
+                            _safe(kalshi_snap.get("yes_ask")), _safe(kalshi_snap.get("lean")),
+                            now_local if kalshi_snap.get("feed_connected") else side_state.get("kalshi_local_ts_last"),
+                            market["id"], side,
+                        ))
+                        side_state["hit"] = True
+                    else:
+                        cur.execute("""
+                            INSERT INTO kalshi_maker_quotes
+                            (market_id, side, quote_first_price, quote_last_price,
+                             quote_first_local_ts, quote_last_local_ts, n_ticks,
+                             kalshi_yes_ask_last, kalshi_lean_last, kalshi_feed_connected_last, kalshi_local_ts_last)
+                            VALUES (%s,%s,%s,%s,%s,%s,1,%s,%s,%s,%s)
+                            ON CONFLICT (market_id, side) DO UPDATE SET
+                                quote_last_price = EXCLUDED.quote_last_price,
+                                quote_last_local_ts = EXCLUDED.quote_last_local_ts,
+                                n_ticks = kalshi_maker_quotes.n_ticks + 1,
+                                kalshi_yes_ask_last = EXCLUDED.kalshi_yes_ask_last,
+                                kalshi_lean_last = EXCLUDED.kalshi_lean_last,
+                                kalshi_feed_connected_last = EXCLUDED.kalshi_feed_connected_last,
+                                kalshi_local_ts_last = EXCLUDED.kalshi_local_ts_last,
+                                updated_at = NOW()
+                            WHERE NOT kalshi_maker_quotes.hit
+                        """, (
+                            market["id"], side, level, level, now_local, now_local,
+                            _safe(kalshi_snap.get("yes_ask")), _safe(kalshi_snap.get("lean")),
+                            bool(kalshi_snap.get("feed_connected")), now_local,
+                        ))
+            except Exception as e:
+                logger.debug(f"log_kalshi_maker_quotes error [{market['id']}/{side}]: {e}")
+
+            side_state["last_price"] = level
+            if kalshi_snap.get("feed_connected"):
+                side_state["kalshi_local_ts_last"] = now_local
+
+        return state
+
+    def resolve_pending_kalshi_maker_quotes(self):
+        """Mismo patrón que resolve_pending_book_snapshots — tabla y
+        ciclo de vida propios."""
+        if not self.conn:
+            return
+        try:
+            with self.conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute("""
+                    SELECT DISTINCT market_id FROM kalshi_maker_quotes
+                    WHERE resolved_at IS NULL
+                """)
+                pending = cur.fetchall()
+        except Exception as e:
+            logger.error(f"resolve_pending_kalshi_maker_quotes query error: {e}")
+            return
+
+        for row in pending:
+            market_id = row["market_id"]
+            try:
+                r = requests.get(f"{GAMMA_API}/markets/{market_id}", timeout=8)
+                if r.status_code != 200:
+                    continue
+                m = r.json()
+                if not (m.get("closed") or m.get("resolved")):
+                    continue
+                outcome = _determine_outcome(m)
+                if not outcome:
+                    continue
+                with self.conn.cursor() as cur:
+                    cur.execute("""
+                        UPDATE kalshi_maker_quotes
+                        SET resolved_at = NOW(), actual_outcome = %s
+                        WHERE market_id = %s
+                    """, (outcome, market_id))
+            except Exception as e:
+                logger.debug(f"resolve_pending_kalshi_maker_quotes error {market_id}: {e}")
 
     def log_decision(self, market, indicators, signal, chainlink_feed, kraken_window_ts, kraken_ref_open, order_flow_feed=None, kalshi_feed=None):
         if not self.conn:

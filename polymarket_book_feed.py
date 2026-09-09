@@ -271,11 +271,23 @@ class PolymarketBookFeed:
                 asset_id = payload.get("tokenId") or payload.get("asset_id")
                 if not asset_id:
                     continue
+                # exchange_ts_ms (9-sep-2026, para el experimento de
+                # cancelación con Kalshi): timestamp propio del exchange,
+                # separado de `ts` (hora local de recepción, que es lo
+                # único que se guardaba antes). Sin este campo no se puede
+                # distinguir un lead real de Kalshi de una diferencia de
+                # relojes/latencia de red — ver mensaje_otra_ia_6.md.
+                raw_exch_ts = payload.get("timestamp")
+                try:
+                    exchange_ts_ms = int(raw_exch_ts) if raw_exch_ts is not None else None
+                except (TypeError, ValueError):
+                    exchange_ts_ms = None
                 trade = {
                     "price": _to_float(payload.get("price")),
                     "size": _to_float(payload.get("size")),
                     "side": payload.get("side"),
                     "ts": now,
+                    "exchange_ts_ms": exchange_ts_ms,
                     "tx_hash": payload.get("transactionHash"),
                 }
                 with self._lock:
