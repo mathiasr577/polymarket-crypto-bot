@@ -118,6 +118,22 @@ class FomoFeed:
             self._buys_by_token.clear()
             self._consensus_seen.clear()
             logger.info(f"FomoFeed reconectado: {data}")
+            # 9-sep-2026, encontrado en revisión: FOMO reconoce la key de
+            # forma inconsistente — a veces (visto en producción, no solo
+            # en pruebas manuales) el welcome viene con realtime:false,
+            # como si no hubiera key (delay de 60s, feed demo). Sin este
+            # chequeo, esa degradación quedaría en silencio por TODA la
+            # vida de esa conexión (podrían ser horas o días) — nada tira
+            # error, solo se ve peor calidad de dato. Si pasa, se fuerza
+            # una reconexión en vez de aceptarla.
+            if not data.get("realtime"):
+                logger.warning(
+                    f"FomoFeed: welcome sin realtime (key no reconocida esta vez) — forzando reconexión: {data}"
+                )
+                try:
+                    ws.close()
+                except Exception:
+                    pass
             return
         if msg_type != "alert":
             return
