@@ -468,6 +468,16 @@ def _tick(scanner, feed, paper, live, shadow=None, chainlink=None, paper_v2=None
 BOOK_SNAPSHOT_INTERVAL_SEC = 3
 BOOK_SNAPSHOT_RESOLVE_EVERY_N = 10  # cada ~30s, no en cada foto — ahorra pegarle a Gamma de más
 
+# 9-sep-2026: límite propio del loop de snapshots, INDEPENDIENTE de
+# V2_ENTRY_END (55s, el de la señal viva — no se toca, sigue igual para
+# trading real). shadow_book_snapshots venía cortando justo en 55s
+# restantes, que resultó ser EXACTAMENTE la zona que la Propuesta 1 de
+# "TWAP Decay Lock-In" (mensaje_ia_nueva) necesita para poder probarse
+# (t en [240,300] = seconds_remaining en [0,60]) — nunca la
+# instrumentamos. Bajado a -5 (5s después del cierre nominal) para tener
+# margen y no cortar justo antes de la resolución.
+BOOK_SNAPSHOT_ENTRY_END = -5
+
 
 def _book_snapshot_loop(scanner, chainlink, order_flow, book_feed, shadow, kalshi=None):
     """Loop propio, más rápido que trading_loop's ~10s — ver diseño del
@@ -487,7 +497,7 @@ def _book_snapshot_loop(scanner, chainlink, order_flow, book_feed, shadow, kalsh
             markets = scanner.get_markets()
             for market in markets or []:
                 seconds_left = market.get("seconds_left", 300)
-                if seconds_left > V2_ENTRY_START or seconds_left < V2_ENTRY_END:
+                if seconds_left > V2_ENTRY_START or seconds_left < BOOK_SNAPSHOT_ENTRY_END:
                     continue
                 asset = market["asset"]
 
