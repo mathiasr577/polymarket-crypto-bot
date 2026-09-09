@@ -109,6 +109,19 @@ class WalletCopyFeed:
                 for delay in COPY_CHECK_DELAYS_SEC:
                     self._pending_copy_checks.append((row_id, token_id, now + delay, delay))
 
+    def _reconnect_shadow(self):
+        """9-sep-2026, encontrado en revisión: shadow_logger.py nunca
+        reconecta su conexión sola si se cae (ni acá ni en ningún otro
+        lugar del proyecto — no es un problema nuevo de este archivo, es
+        sistémico). No lo toco desde afuera, pero reutilizo su propio
+        _connect() ya existente para al menos intentar restaurarla acá."""
+        if not self.shadow:
+            return
+        try:
+            self.shadow._connect()
+        except Exception as e:
+            logger.debug(f"WalletCopyFeed reconnect shadow DB error: {e}")
+
     def _log_trade(self, t: dict):
         if not self.shadow or not self.shadow.conn:
             return None
@@ -131,10 +144,7 @@ class WalletCopyFeed:
                 return row[0] if row else None
         except Exception as e:
             logger.debug(f"WalletCopyFeed log_trade error: {e}")
-            try:
-                self.shadow.conn.rollback()
-            except Exception:
-                pass
+            self._reconnect_shadow()
             return None
 
     def _process_pending_copy_checks(self):
@@ -160,6 +170,7 @@ class WalletCopyFeed:
                 self.shadow.conn.commit()
             except Exception as e:
                 logger.debug(f"WalletCopyFeed copy-price error [{token_id}]: {e}")
+                self._reconnect_shadow()
 
     def _resolve_pending(self):
         if not self.shadow or not self.shadow.conn:
@@ -167,22 +178,39 @@ class WalletCopyFeed:
         try:
             with self.shadow.conn.cursor() as cur:
                 cur.execute("""
-                    SELECT DISTINCT condition_id FROM wallet_copy_trades
+                    SELECT condition_id, MIN(exchange_ts_sec) FROM wallet_copy_trades
                     WHERE resolved_at IS NULL AND condition_id IS NOT NULL
+                    GROUP BY condition_id
+                    ORDER BY MIN(exchange_ts_sec) ASC
                     LIMIT 200
                 """)
-                pending = [row[0] for row in cur.fetchall()]
+                pending = cur.fetchall()
         except Exception as e:
             logger.debug(f"WalletCopyFeed resolve query error: {e}")
             return
 
-        for cid in pending:
+        for cid, first_seen_sec in pending:
             try:
+                # 9-sep-2026, bug real encontrado en revisión: si un mercado
+                # nunca resuelve limpio (empatado/anulado) o desaparece de
+                # la API, esa fila se quedaba en "pendiente" para siempre —
+                # y con el LIMIT 200 de arriba, con el tiempo eso podía
+                # llenar los 200 lugares y dejar sin chequear mercados que
+                # sí habían resuelto bien. ORDER BY antigüedad (para no
+                # dejar de intentar los más viejos primero) + abandonar
+                # después de 14 días reales sin resolver.
+                age_days = (time.time() - float(first_seen_sec)) / 86400 if first_seen_sec else 0
+                give_up = age_days > 14
+
                 r = requests.get(f"{GAMMA_API}/markets", params={"condition_ids": cid}, timeout=8)
                 if r.status_code != 200:
+                    if give_up:
+                        self._abandon(cid)
                     continue
                 markets = r.json()
                 if not markets:
+                    if give_up:
+                        self._abandon(cid)
                     continue
                 m = markets[0]
                 if not m.get("closed"):
@@ -196,6 +224,8 @@ class WalletCopyFeed:
                     import json as _json
                     prices = _json.loads(prices)
                 if not outcomes or not prices:
+                    if give_up:
+                        self._abandon(cid)
                     continue
                 winner = None
                 for o, p in zip(outcomes, prices):
@@ -203,6 +233,10 @@ class WalletCopyFeed:
                         winner = o
                         break
                 if not winner:
+                    # cerrado pero sin ganador claro (empate/anulado) — no
+                    # tiene sentido seguir preguntando por esto cada ciclo,
+                    # se resuelve ya con outcome desconocido.
+                    self._abandon(cid)
                     continue
                 with self.shadow.conn.cursor() as cur:
                     cur.execute("""
@@ -224,6 +258,25 @@ class WalletCopyFeed:
                 self.shadow.conn.commit()
             except Exception as e:
                 logger.debug(f"WalletCopyFeed resolve error [{cid}]: {e}")
+                self._reconnect_shadow()
+
+    def _abandon(self, condition_id: str):
+        """Marca como resuelto con outcome desconocido (NULL) — para
+        mercados que cerraron sin ganador claro, o que ya no se pueden
+        encontrar en la API después de 14 días de intentarlo. Sin esto
+        esas filas nunca salen de la cola de 'pendiente' (ver comentario
+        en _resolve_pending)."""
+        if not self.shadow or not self.shadow.conn:
+            return
+        try:
+            with self.shadow.conn.cursor() as cur:
+                cur.execute("""
+                    UPDATE wallet_copy_trades SET resolved_at=NOW(), actual_outcome=NULL
+                    WHERE condition_id=%s AND resolved_at IS NULL
+                """, (condition_id,))
+            self.shadow.conn.commit()
+        except Exception as e:
+            logger.debug(f"WalletCopyFeed abandon error [{condition_id}]: {e}")
 
 
 _feed = None
