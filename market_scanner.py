@@ -46,6 +46,13 @@ CREATE INDEX IF NOT EXISTS idx_market_liquidity_ticks_ts ON market_liquidity_tic
 # mercados antes de invertir tiempo en construir la lógica de ejecución.
 ARB_GAP_THRESHOLD = 0.97
 
+# 9-sep-2026: divergencia máxima tolerada entre el precio real de CLOB y
+# el de referencia de Gamma para el MISMO token — si se pasa, se trata el
+# precio de CLOB como no confiable (libro vacío devolviendo un piso
+# degenerado) en vez de como una oportunidad real. Ver comentario en
+# _fetch() — encontrado evaluando una propuesta externa de arbitraje.
+ARB_SANITY_MAX_DIVERGENCE = 0.15
+
 # Ventana en la que se pide el precio BUY real del order book en vez de
 # confiar en outcomePrices de Gamma (que puede estar stale). Debe cubrir al
 # menos toda la ventana de entrada del signal_engine, con margen.
@@ -252,6 +259,29 @@ class MarketScanner:
                     used_real_clob_prices = True
             else:
                 up_price, down_price = self._get_outcome_prices(m, outcomes)
+
+            # 9-sep-2026: bug real encontrado evaluando la Propuesta 2 de la
+            # IA nueva consultada (split/merge arb) — _get_clob_buy_price
+            # devuelve a veces un precio piso degenerado (visto en
+            # producción: 0.05 en AMBOS lados, repetido en varias fotos
+            # seguidas del mismo mercado) cuando el libro real está vacío,
+            # no un precio ejecutable de verdad. Esto generaba falsos
+            # "arbitraje" en los logs — verificado contra shadow_book_snapshots
+            # (fuente WebSocket, confiable): en 12,384+14,884 fotos reales de
+            # BTC, ask+ask y bid+bid NUNCA cruzan 1.0 — cero arbitraje real.
+            # Cruce de cordura: si el precio CLOB diverge demasiado del
+            # precio de referencia de Gamma para el MISMO token, es más
+            # probable que sea un libro vacío que una oportunidad real.
+            if used_real_clob_prices:
+                ref_up, ref_down = self._get_outcome_prices(m, outcomes)
+                if abs(up_price - ref_up) > ARB_SANITY_MAX_DIVERGENCE or abs(down_price - ref_down) > ARB_SANITY_MAX_DIVERGENCE:
+                    logger.debug(
+                        f"Precio CLOB descartado por divergencia sospechosa vs Gamma "
+                        f"[{slug}]: CLOB up={up_price:.3f} down={down_price:.3f} vs "
+                        f"Gamma up={ref_up:.3f} down={ref_down:.3f} — probable libro vacío"
+                    )
+                    used_real_clob_prices = False
+                    up_price, down_price = ref_up, ref_down
 
             if used_real_clob_prices:
                 self._check_arb_gap(asset, slug, up_price, down_price, seconds_left)

@@ -494,7 +494,15 @@ def _book_snapshot_loop(scanner, chainlink, order_flow, book_feed, shadow, kalsh
     while True:
         try:
             tick_n += 1
-            markets = scanner.get_markets()
+            # 9-sep-2026: restringido a horario real de trading (9AM-6PM ET),
+            # mismo criterio que trading_loop — pedido explícito después de
+            # ver que el backtest de maker terminó con ~3x más mercados de
+            # los esperados por correr 24/7 (estos mercados no paran nunca,
+            # a diferencia de nuestro horario real). No tiene sentido seguir
+            # juntando datos de madrugada para nada que vayamos a operar.
+            hour_utc = datetime.now(timezone.utc).hour
+            trading_hours = config.TRADING_START_UTC <= hour_utc < config.TRADING_END_UTC
+            markets = scanner.get_markets() if trading_hours else []
             for market in markets or []:
                 seconds_left = market.get("seconds_left", 300)
                 if seconds_left > V2_ENTRY_START or seconds_left < BOOK_SNAPSHOT_ENTRY_END:
