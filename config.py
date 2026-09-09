@@ -9,6 +9,11 @@ CLOB_HOST = "https://clob.polymarket.com"
 # DB
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
 
+# FOMO API (fomoapi.io) — 9-sep-2026, proyecto distinto al de Polymarket:
+# señal de consenso entre traders top de memecoins, para operar de forma
+# independiente en Coinbase (Solana DEX). Ver fomo_feed.py.
+FOMO_API_KEY = os.environ.get("FOMO_API_KEY", "")
+
 # Trading mode
 PAPER_TRADING = os.environ.get("PAPER_TRADING", "true").lower() == "true"
 PAPER_BALANCE = 500.0

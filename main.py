@@ -14,6 +14,7 @@ logger = logging.getLogger(__name__)
 import config
 from price_feed import start_feed, get_feed
 from market_scanner import start_scanner, get_scanner
+from fomo_feed import start_fomo_feed
 from signal_engine import generate_signal, kelly_size, ENTRY_WINDOW_START, ENTRY_WINDOW_END
 from paper_trader import get_trader
 from dashboard import create_dashboard
@@ -647,6 +648,7 @@ def main():
 
     start_feed()
     start_scanner()
+    start_fomo_feed()  # proyecto independiente, no depende de SHADOW_MODE_ENABLED — ver fomo_feed.py
     if config.SHADOW_MODE_ENABLED:
         start_chainlink_feed()
         start_order_flow_feed()
