@@ -18,11 +18,16 @@ Verificado en vivo antes de escribir esto (no asumido de la doc):
   (realtime los primeros 7 días, después 15s de delay).
 
 Señal: cuando >=CONSENSUS_MIN_TRADERS traders DISTINTOS compran el
-mismo token dentro de CONSENSUS_WINDOW_MINUTES, se loguea el evento.
-Todavía no se calcula qué pasó con el precio después — se agrega en
-un segundo paso, una vez que se vea cuánto pasa esto y en qué chains
-(Solana vs Base vs Robinhood tienen fuentes de precio distintas, no
-tiene sentido construir las tres a ciegas).
+mismo token dentro de CONSENSUS_WINDOW_MINUTES Y el USD combinado
+supera CONSENSUS_MIN_TOTAL_USD, se loguea el evento.
+
+10-sep-2026: con el umbral inicial (3 traders, sin mínimo de USD)
+salían ~20 eventos/hora, TODOS con exactamente 3 traders — ruido. Se
+subió a 4 traders + $50k combinado. Y se agregó tracking de precio del
+token a +15min/+1h/+6h/+24h vía DexScreener (gratis, sin key, cubre
+todas las chains) — sin esto no hay forma de saber si el consenso
+predice algo. Los checkpoints se llenan contra la DB (no memoria)
+para sobrevivir reconexiones en la ventana de 24h.
 
 Solo lectura/logging — no ejecuta ninguna orden real todavía.
 """
@@ -34,15 +39,25 @@ from collections import defaultdict, deque
 
 import websocket
 import psycopg2
+import requests
 
 from config import DATABASE_URL, FOMO_API_KEY
 
 logger = logging.getLogger(__name__)
 
 WS_URL = "wss://api.fomoapi.io/ws/alerts"
-CONSENSUS_MIN_TRADERS = 3
+# 10-sep-2026: subido de 3 a 4 traders + mínimo de USD combinado. Con
+# el umbral de 3 salían ~20 eventos/hora y TODOS tenían exactamente 3
+# traders (nunca más) — señal claramente demasiado floja, era ruido.
+CONSENSUS_MIN_TRADERS = 4
+CONSENSUS_MIN_TOTAL_USD = 50000
 CONSENSUS_WINDOW_MINUTES = 15
 RECONNECT_DELAY_SEC = 5
+
+# Chequeos de precio post-evento (DexScreener, gratis, multi-chain).
+DEXSCREENER = "https://api.dexscreener.com/latest/dex/tokens"
+PRICE_CHECKPOINTS = [("price_15m", 15 * 60), ("price_1h", 3600),
+                     ("price_6h", 6 * 3600), ("price_24h", 24 * 3600)]
 
 
 class FomoFeed:
@@ -102,6 +117,13 @@ class FomoFeed:
                 self._cleanup_empty_tokens()
             except Exception as e:
                 logger.debug(f"FomoFeed cleanup error: {e}")
+        if self._msg_count % 400 == 0:
+            # ~cada pocos minutos dado el volumen de alertas — llena los
+            # precios post-evento (15m/1h/6h/24h) de los consensos.
+            try:
+                self._update_pending_prices()
+            except Exception as e:
+                logger.debug(f"FomoFeed pending-prices error: {e}")
         try:
             data = json.loads(message)
         except Exception:
@@ -163,7 +185,8 @@ class FomoFeed:
             dq.popleft()
 
         unique_traders = {t for t, _, _ in dq}
-        if len(unique_traders) >= CONSENSUS_MIN_TRADERS:
+        total_usd = sum(u for _, _, u in dq)
+        if len(unique_traders) >= CONSENSUS_MIN_TRADERS and total_usd >= CONSENSUS_MIN_TOTAL_USD:
             # evitar re-loguear el mismo consenso en cada compra adicional —
             # solo el momento en que se CRUZA el umbral por primera vez en
             # esta racha.
@@ -216,21 +239,41 @@ class FomoFeed:
             logger.debug(f"FomoFeed log_alert error: {e} — reconectando DB")
             self._reconnect_db()
 
+    def _dexscreener_price(self, token_address: str):
+        """(priceUsd, liquidezUsd) del par más líquido, o (None, None).
+        Gratis, sin key, multi-chain (solana/base/bsc/robinhood/eth)."""
+        try:
+            r = requests.get(f"{DEXSCREENER}/{token_address}", timeout=6)
+            if r.status_code != 200:
+                return None, None
+            pairs = r.json().get("pairs") or []
+            if not pairs:
+                return None, None
+            best = max(pairs, key=lambda p: (p.get("liquidity") or {}).get("usd") or 0)
+            price = best.get("priceUsd")
+            liq = (best.get("liquidity") or {}).get("usd")
+            return (float(price) if price else None, float(liq) if liq else None)
+        except Exception:
+            return None, None
+
     def _log_consensus_event(self, alert: dict, dq: deque, unique_traders: set):
         if not self._conn:
             return
         try:
             total_usd = sum(u for _, _, u in dq)
+            price_now, liq_now = self._dexscreener_price(alert.get("tokenAddress"))
             with self._conn.cursor() as cur:
                 cur.execute("""
                     INSERT INTO fomo_consensus_events
                     (token, token_address, chain, unique_traders, trader_handles,
-                     total_usd, window_minutes, first_alert_ts_ms, last_alert_ts_ms)
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                     total_usd, window_minutes, first_alert_ts_ms, last_alert_ts_ms,
+                     price_at_event, liq_usd_at_event)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                 """, (
                     alert.get("token"), alert.get("tokenAddress"), alert.get("chain"),
                     len(unique_traders), ",".join(sorted(unique_traders)),
                     total_usd, CONSENSUS_WINDOW_MINUTES, dq[0][1], dq[-1][1],
+                    price_now, liq_now,
                 ))
             logger.info(
                 f"🔥 Consenso FOMO: {alert.get('token')} ({alert.get('chain')}) — "
@@ -249,6 +292,49 @@ class FomoFeed:
         empty = [tok for tok, dq in self._buys_by_token.items() if not dq]
         for tok in empty:
             del self._buys_by_token[tok]
+
+    def _update_pending_prices(self):
+        """Llena price_15m/1h/6h/24h de eventos de consenso cuya edad ya
+        pasó cada checkpoint. Va contra la DB (no memoria) para que
+        sobreviva reconexiones — la ventana es de 24h. Se marca
+        price_done cuando ya se llenó el checkpoint de 24h."""
+        if not self._conn:
+            return
+        try:
+            with self._conn.cursor() as cur:
+                cur.execute("""
+                    SELECT id, token_address, EXTRACT(EPOCH FROM (now() - crossed_at)),
+                           price_15m, price_1h, price_6h, price_24h
+                    FROM fomo_consensus_events
+                    WHERE price_done = FALSE AND crossed_at > now() - interval '30 hours'
+                    ORDER BY crossed_at
+                    LIMIT 40
+                """)
+                rows = cur.fetchall()
+        except Exception as e:
+            logger.debug(f"FomoFeed pending-prices query error: {e}")
+            self._reconnect_db()
+            return
+
+        for rid, addr, age_sec, p15, p1, p6, p24 in rows:
+            have = {"price_15m": p15, "price_1h": p1, "price_6h": p6, "price_24h": p24}
+            due = [(col, sec) for col, sec in PRICE_CHECKPOINTS if age_sec >= sec and have[col] is None]
+            if not due:
+                continue
+            price, _ = self._dexscreener_price(addr)
+            if price is None:
+                continue
+            try:
+                with self._conn.cursor() as cur:
+                    for col, _sec in due:
+                        cur.execute(f"UPDATE fomo_consensus_events SET {col}=%s WHERE id=%s", (price, rid))
+                    # si ya llenamos el de 24h (o el evento tiene >26h y no
+                    # se pudo antes), cerrar
+                    if any(col == "price_24h" for col, _ in due) or age_sec > 26 * 3600:
+                        cur.execute("UPDATE fomo_consensus_events SET price_done=TRUE WHERE id=%s", (rid,))
+            except Exception as e:
+                logger.debug(f"FomoFeed pending-prices update error [{rid}]: {e}")
+                self._reconnect_db()
 
 
 _feed = None
