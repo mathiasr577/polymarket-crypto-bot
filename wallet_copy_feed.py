@@ -202,35 +202,24 @@ class WalletCopyFeed:
                 age_days = (time.time() - float(first_seen_sec)) / 86400 if first_seen_sec else 0
                 give_up = age_days > 14
 
-                r = requests.get(f"{GAMMA_API}/markets", params={"condition_ids": cid}, timeout=8)
+                # 10-sep-2026, bug real encontrado en revisión: gamma-api
+                # /markets?condition_ids= devuelve [] para mercados ya
+                # resueltos/archivados (sports, esports viejos) — por eso
+                # 0 de ~2000 trades se resolvían. El CLOB /markets/{cid} sí
+                # los devuelve, con un flag "winner" por token. Se usa ese.
+                r = requests.get(f"{CLOB}/markets/{cid}", headers=_HEADERS, timeout=8)
                 if r.status_code != 200:
                     if give_up:
                         self._abandon(cid)
                     continue
-                markets = r.json()
-                if not markets:
-                    if give_up:
-                        self._abandon(cid)
-                    continue
-                m = markets[0]
+                m = r.json()
                 if not m.get("closed"):
                     continue
-                outcomes = m.get("outcomes")
-                prices = m.get("outcomePrices")
-                if isinstance(outcomes, str):
-                    import json as _json
-                    outcomes = _json.loads(outcomes)
-                if isinstance(prices, str):
-                    import json as _json
-                    prices = _json.loads(prices)
-                if not outcomes or not prices:
-                    if give_up:
-                        self._abandon(cid)
-                    continue
+                tokens = m.get("tokens") or []
                 winner = None
-                for o, p in zip(outcomes, prices):
-                    if float(p) >= 0.5:
-                        winner = o
+                for tk in tokens:
+                    if tk.get("winner") is True:
+                        winner = tk.get("outcome")
                         break
                 if not winner:
                     # cerrado pero sin ganador claro (empate/anulado) — no
