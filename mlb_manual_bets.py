@@ -1,31 +1,32 @@
 """
-Compra manual de 3 mercados de MLB — 9-sep-2026 (noche), $40 c/u.
+Compra manual de 3 mercados de MLB — 11-sep-2026, $40 c/u.
 
 Mismo criterio de siempre: precio de mercado + récord de equipo +
-abridor confirmado (W-L/ERA real de hoy), eligiendo los 3 donde las
-tres señales apuntan en la misma dirección con el mayor margen.
+abridor confirmado, eligiendo los 3 donde las tres señales apuntan en
+la misma dirección con el mayor margen. Hoy la cartelera tenía tres
+abridores de elite clarísimos (Snell 1.97, Gray 2.69, Sale 2.10) — la
+señal más limpia que vimos en varios días.
 
-  1. Yankees (69%) vs Rockies
-     Equipo: NYY 82-62 vs COL 55-89 (27 juegos de diferencia)
-     Abridor: Warren (4.16 ERA) vs Sugano (12-8, 5.19 ERA — más
-     victorias pero peor ERA)
+  1. Dodgers (65.5%) vs Marlins
+     Abridor: Snell (3-1, 1.97 ERA — el mejor de toda la cartelera de
+     hoy) vs Gusto (1-4, 4.23 ERA)
+     Equipo: LAD 89-57 vs MIA 72-75
 
-  2. Red Sox (67%) vs Angels
-     Equipo: BOS 80-66 vs LAA 55-90 (25 juegos de diferencia)
-     Abridor: Bennett (9-6, 3.34 ERA) vs Johnson (3-8, 5.17 ERA)
+  2. Red Sox (64.5%) vs Royals
+     Abridor: Gray (17-4, 2.69 ERA — el mejor récord del día) vs
+     Lugo (6-8, 5.04 ERA)
+     Equipo: BOS 80-67 vs KC 65-82
 
-  3. Phillies (59%) vs Astros
-     Equipo: PHI 81-64 vs HOU 74-71
-     Abridor: Sánchez (16-5, 2.58 ERA — el mejor abridor de la noche)
-     vs Brown (5-3, 3.31 ERA)
+  3. Braves (62.5%) vs Phillies
+     Abridor: Sale (14-9, 2.10 ERA) vs Nola (6-10, 4.76 ERA)
+     Equipo: ATL 86-61 vs PHI 82-65
 
-Descartados a propósito por señal mixta (abridor apunta fuerte para un
-lado, mercado casi 50/50):
-  - Guardians @ Orioles: Griffin (15-4, 3.26 ERA) claramente mejor que
-    Baz (5-15, 3.91 ERA), pero el mercado lo tiene 52/49.
-  - D-backs @ Royals: Lynch IV (3.51 ERA) mejor que Gallen (3-9,
-    6.34 ERA — el peor abridor de la noche), pero el mercado favorece
-    a Arizona 53/48 de todos modos (pesa más el equipo).
+Descartados a propósito por señal mixta:
+  - Reds @ Brewers: Abbott (Reds) tiene ERA levemente mejor que May
+    (Brewers), pero el equipo favorece a Brewers enorme (91-56, mejor
+    récord de la liga) — señales en direcciones opuestas.
+  - Mets @ Yankees: abridores casi idénticos en ERA (McLean 3.06 vs
+    Rodon 3.09), solo el equipo desempata — señal débil.
 
 Uso (desde este directorio, linkeado a Railway):
     railway ssh -- python3 mlb_manual_bets.py            # dry-run
@@ -39,19 +40,19 @@ STAKE_USD = 40.0
 
 BETS = [
     {
-        "label": "Rockies vs. Yankees (9-sep 7:05PM ET) -> YANKEES  [Warren 4.16 ERA vs Sugano 5.19 ERA | equipo 82-62 vs 55-89]",
-        "token_id": "102610793437419434317942016639744997329315321292066569643528136750802956679568",
-        "ref_price": 0.685,
+        "label": "Dodgers vs. Marlins (11-sep 7:10PM ET) -> DODGERS  [Snell 1.97 ERA vs Gusto 4.23 ERA | equipo 89-57 vs 72-75]",
+        "token_id": "55002249387036495345982054447485774024728223596512918828269505992441438648612",
+        "ref_price": 0.655,
     },
     {
-        "label": "Angels vs. Red Sox (9-sep 6:45PM ET) -> RED SOX  [Bennett 3.34 ERA vs Johnson 5.17 ERA | equipo 80-66 vs 55-90]",
-        "token_id": "73472705305215679423165207336394684080922271528558499724867912312811116041446",
-        "ref_price": 0.665,
+        "label": "Royals vs. Red Sox (11-sep 7:10PM ET) -> RED SOX  [Gray 17-4, 2.69 ERA vs Lugo 5.04 ERA | equipo 80-67 vs 65-82]",
+        "token_id": "38332595592467516145651294679578078035245459978716558512124893180623730000182",
+        "ref_price": 0.645,
     },
     {
-        "label": "Astros vs. Phillies (9-sep 6:40PM ET) -> PHILLIES  [Sanchez 2.58 ERA, 16-5 vs Brown 3.31 ERA | equipo 81-64 vs 74-71]",
-        "token_id": "26163023612231363062836937730589969759234649459704881282856491869593937399842",
-        "ref_price": 0.585,
+        "label": "Phillies vs. Braves (11-sep 7:15PM ET) -> BRAVES  [Sale 14-9, 2.10 ERA vs Nola 4.76 ERA | equipo 86-61 vs 82-65]",
+        "token_id": "74834568141968122506589401336439382929458771337886372009351505602834271772474",
+        "ref_price": 0.625,
     },
 ]
 
