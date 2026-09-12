@@ -1,32 +1,30 @@
 """
-Compra manual de 3 mercados de MLB — 11-sep-2026, $40 c/u.
+Compra manual de 3 mercados de MLB — 12-sep-2026, $40 c/u.
 
 Mismo criterio de siempre: precio de mercado + récord de equipo +
 abridor confirmado, eligiendo los 3 donde las tres señales apuntan en
-la misma dirección con el mayor margen. Hoy la cartelera tenía tres
-abridores de elite clarísimos (Snell 1.97, Gray 2.69, Sale 2.10) — la
-señal más limpia que vimos en varios días.
+la misma dirección con el mayor margen.
 
-  1. Dodgers (65.5%) vs Marlins
-     Abridor: Snell (3-1, 1.97 ERA — el mejor de toda la cartelera de
-     hoy) vs Gusto (1-4, 4.23 ERA)
-     Equipo: LAD 89-57 vs MIA 72-75
+  1. Dodgers (62.5%) vs Marlins
+     Glasnow (4-0, 3.12 ERA) vs Phillips (5-6, 3.51 ERA)
+     Equipo: LAD 90-57 (mejor récord de las mayores) vs MIA 72-76
 
-  2. Red Sox (64.5%) vs Royals
-     Abridor: Gray (17-4, 2.69 ERA — el mejor récord del día) vs
-     Lugo (6-8, 5.04 ERA)
-     Equipo: BOS 80-67 vs KC 65-82
+  2. Brewers (62.5%) vs Reds
+     Harrison (10-4, 3.66 ERA) vs Singer (6-13, 5.03 ERA)
+     Equipo: MIL 92-56 (el mejor récord de toda la liga) vs CIN 69-78
 
-  3. Braves (62.5%) vs Phillies
-     Abridor: Sale (14-9, 2.10 ERA) vs Nola (6-10, 4.76 ERA)
-     Equipo: ATL 86-61 vs PHI 82-65
+  3. Mariners (61.5%) vs Athletics
+     Woo (11-9, 4.03 ERA) vs Jump (6-10, 5.12 ERA)
+     Equipo: SEA 69-79 vs OAK 60-88
 
-Descartados a propósito por señal mixta:
-  - Reds @ Brewers: Abbott (Reds) tiene ERA levemente mejor que May
-    (Brewers), pero el equipo favorece a Brewers enorme (91-56, mejor
-    récord de la liga) — señales en direcciones opuestas.
-  - Mets @ Yankees: abridores casi idénticos en ERA (McLean 3.06 vs
-    Rodon 3.09), solo el equipo desempata — señal débil.
+Descartados a propósito por señal mixta (abridor favorece un lado, el
+equipo el otro — el mismo tipo de conflicto que nos hizo perder la de
+Red Sox el 11-sep):
+  - Royals @ Red Sox: Dobnak (2.54 ERA) mejor que Suarez, pero Boston
+    es mucho mejor equipo (80-68 vs 66-82).
+  - Astros @ Rays: Lambert mejor ERA que Seymour, pero Tampa Bay es
+    mucho mejor equipo (88-59 vs 75-73).
+  - Phillies @ Braves: abridor de Philadelphia todavía "Undecided".
 
 Uso (desde este directorio, linkeado a Railway):
     railway ssh -- python3 mlb_manual_bets.py            # dry-run
@@ -40,19 +38,19 @@ STAKE_USD = 40.0
 
 BETS = [
     {
-        "label": "Dodgers vs. Marlins (11-sep 7:10PM ET) -> DODGERS  [Snell 1.97 ERA vs Gusto 4.23 ERA | equipo 89-57 vs 72-75]",
-        "token_id": "55002249387036495345982054447485774024728223596512918828269505992441438648612",
-        "ref_price": 0.655,
-    },
-    {
-        "label": "Royals vs. Red Sox (11-sep 7:10PM ET) -> RED SOX  [Gray 17-4, 2.69 ERA vs Lugo 5.04 ERA | equipo 80-67 vs 65-82]",
-        "token_id": "38332595592467516145651294679578078035245459978716558512124893180623730000182",
-        "ref_price": 0.645,
-    },
-    {
-        "label": "Phillies vs. Braves (11-sep 7:15PM ET) -> BRAVES  [Sale 14-9, 2.10 ERA vs Nola 4.76 ERA | equipo 86-61 vs 82-65]",
-        "token_id": "74834568141968122506589401336439382929458771337886372009351505602834271772474",
+        "label": "Dodgers vs. Marlins (12-sep 4:10PM ET) -> DODGERS  [Glasnow 3.12 ERA vs Phillips 3.51 ERA | equipo 90-57 vs 72-76]",
+        "token_id": "89254313729353657865448740606800371484028707376712453212148059579290368635237",
         "ref_price": 0.625,
+    },
+    {
+        "label": "Reds vs. Brewers (12-sep 7:10PM ET) -> BREWERS  [Harrison 10-4, 3.66 ERA vs Singer 6-13, 5.03 ERA | equipo 92-56 vs 69-78]",
+        "token_id": "29709678869675293155685850008106215817128012954892729405079042054890388004047",
+        "ref_price": 0.625,
+    },
+    {
+        "label": "Mariners vs. Athletics (12-sep 9:40PM ET) -> MARINERS  [Woo 4.03 ERA vs Jump 5.12 ERA | equipo 69-79 vs 60-88]",
+        "token_id": "83926356025481135538956165876000129839932688776513163284546224490960048774048",
+        "ref_price": 0.615,
     },
 ]
 
