@@ -203,6 +203,21 @@ class FomoFeed:
 
         self._log_alert(alert)
 
+        # 13-sep-2026, bug real encontrado en chequeo de salud: limpiar
+        # _buys_by_token en el "welcome" (9-sep) evita que el buffer VIEJO
+        # se acumule sin límite entre reconexiones, pero no evita que el
+        # buffer de replay de la conexión NUEVA se procese como si fueran
+        # compras en vivo — visto en producción disparando el MISMO
+        # consenso dos veces (mismos traders, mismos timestamps de origen)
+        # con un crossed_at y un price_at_event distintos y falsos, porque
+        # el precio se pide "ahora" para un evento que en realidad pasó
+        # hace horas. Sin esto, cada reconexión durante un corte largo del
+        # feed puede seguir generando filas fantasma en
+        # fomo_consensus_events con precios capturados en el momento
+        # equivocado — justo lo que el tracking de precio necesita evitar.
+        if alert.get("replay"):
+            return
+
         if alert.get("alertType") != "buy":
             return
 
