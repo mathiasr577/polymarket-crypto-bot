@@ -53,6 +53,15 @@ CONSENSUS_MIN_TRADERS = 4
 CONSENSUS_MIN_TOTAL_USD = 50000
 CONSENSUS_WINDOW_MINUTES = 15
 RECONNECT_DELAY_SEC = 5
+# 13-sep-2026, bug real encontrado en chequeo de salud: la conexión se
+# quedó "viva" (sin on_error ni on_close) pero dejó de recibir mensajes
+# por 92 minutos seguidos — el loop de reconexión de _run_forever nunca
+# se enteró porque nada tiró excepción. Se confirmó en vivo que la API
+# de FOMO seguía funcionando bien en paralelo (script standalone
+# recibiendo mensajes normal en ese mismo momento), así que el corte fue
+# del socket/hilo local, no del servidor. Con una tasa normal de
+# cientos/hora, no recibir nada en 3 minutos es inequívocamente anormal.
+WATCHDOG_TIMEOUT_SEC = 180
 
 # Chequeos de precio post-evento (DexScreener, gratis, multi-chain).
 DEXSCREENER = "https://api.dexscreener.com/latest/dex/tokens"
@@ -71,6 +80,8 @@ class FomoFeed:
         self._buys_by_token = defaultdict(deque)
         self._consensus_seen = set()  # token_address ya logueado en esta racha
         self._msg_count = 0
+        self._ws = None
+        self._last_msg_ts = time.time()
 
     def _connect_db(self):
         if not DATABASE_URL:
@@ -89,6 +100,8 @@ class FomoFeed:
         self._running = True
         self._thread = threading.Thread(target=self._run_forever, daemon=True)
         self._thread.start()
+        self._watchdog_thread = threading.Thread(target=self._watchdog_loop, daemon=True)
+        self._watchdog_thread.start()
         logger.info("FomoFeed started")
 
     def stop(self):
@@ -98,19 +111,38 @@ class FomoFeed:
         while self._running:
             try:
                 url = f"{WS_URL}?key={FOMO_API_KEY}"
+                self._last_msg_ts = time.time()  # resetear al reconectar — no marcar stale antes de que llegue nada
                 ws = websocket.WebSocketApp(
                     url,
                     on_message=self._on_message,
                     on_error=lambda w, e: logger.warning(f"FomoFeed WS error: {e}"),
                     on_close=lambda w, code, msg: logger.warning(f"FomoFeed WS closed: {code} {msg}"),
                 )
+                self._ws = ws
                 ws.run_forever(ping_interval=30, ping_timeout=10)
             except Exception as e:
                 logger.error(f"FomoFeed run_forever error: {e}")
             if self._running:
                 time.sleep(RECONNECT_DELAY_SEC)
 
+    def _watchdog_loop(self):
+        """Ver comentario en WATCHDOG_TIMEOUT_SEC — la única forma real
+        encontrada de detectar un socket colgado que nunca dispara
+        on_error/on_close por sí solo."""
+        while self._running:
+            time.sleep(30)
+            idle = time.time() - self._last_msg_ts
+            if idle > WATCHDOG_TIMEOUT_SEC:
+                logger.warning(f"FomoFeed watchdog: sin mensajes hace {idle:.0f}s — forzando reconexión")
+                try:
+                    if self._ws:
+                        self._ws.close()
+                except Exception as e:
+                    logger.debug(f"FomoFeed watchdog close error: {e}")
+                self._last_msg_ts = time.time()  # evitar cierres repetidos mientras reconecta
+
     def _on_message(self, ws, message):
+        self._last_msg_ts = time.time()
         self._msg_count += 1
         if self._msg_count % 2000 == 0:
             try:
