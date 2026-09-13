@@ -177,28 +177,55 @@ class WalletCopyFeed:
             return
         try:
             with self.shadow.conn.cursor() as cur:
+                # 13-sep-2026, bug real encontrado en chequeo de salud: con
+                # "ORDER BY MIN(exchange_ts_sec) ASC" a secas, el LIMIT 200
+                # queda atrapado para siempre en el mismo bloque de mercados
+                # viejos que tardan mucho en cerrar (o nunca cierran limpio)
+                # -- medido en vivo: de los 200 mas viejos, 0 estaban cerrados
+                # (152 seguian abiertos, 48 daban error), asi que CERO trades
+                # se resolvian por ciclo durante horas aunque siguieran
+                # entrando miles de trades nuevos detras en la cola. Ahora se
+                # ordena por "hace cuanto no lo chequeamos" (tabla aparte
+                # wallet_copy_market_checks), no por antiguedad del trade --
+                # asi cada ciclo rota hacia adelante y con el tiempo se
+                # revisan TODOS los condition_id pendientes, no siempre los
+                # mismos 200 atascados.
                 cur.execute("""
-                    SELECT condition_id, MIN(exchange_ts_sec) FROM wallet_copy_trades
-                    WHERE resolved_at IS NULL AND condition_id IS NOT NULL
-                    GROUP BY condition_id
-                    ORDER BY MIN(exchange_ts_sec) ASC
+                    CREATE TABLE IF NOT EXISTS wallet_copy_market_checks (
+                        condition_id TEXT PRIMARY KEY,
+                        last_checked_at TIMESTAMPTZ
+                    )
+                """)
+                cur.execute("""
+                    SELECT t.condition_id, MIN(t.exchange_ts_sec)
+                    FROM wallet_copy_trades t
+                    LEFT JOIN wallet_copy_market_checks mc ON mc.condition_id = t.condition_id
+                    WHERE t.resolved_at IS NULL AND t.condition_id IS NOT NULL
+                    GROUP BY t.condition_id
+                    ORDER BY COALESCE(MAX(mc.last_checked_at), TIMESTAMP 'epoch') ASC
                     LIMIT 200
                 """)
                 pending = cur.fetchall()
+                self.shadow.conn.commit()
         except Exception as e:
             logger.debug(f"WalletCopyFeed resolve query error: {e}")
+            self._reconnect_shadow()
             return
 
         for cid, first_seen_sec in pending:
             try:
+                with self.shadow.conn.cursor() as cur:
+                    cur.execute("""
+                        INSERT INTO wallet_copy_market_checks (condition_id, last_checked_at)
+                        VALUES (%s, NOW())
+                        ON CONFLICT (condition_id) DO UPDATE SET last_checked_at = NOW()
+                    """, (cid,))
+                self.shadow.conn.commit()
+
                 # 9-sep-2026, bug real encontrado en revisión: si un mercado
                 # nunca resuelve limpio (empatado/anulado) o desaparece de
                 # la API, esa fila se quedaba en "pendiente" para siempre —
-                # y con el LIMIT 200 de arriba, con el tiempo eso podía
-                # llenar los 200 lugares y dejar sin chequear mercados que
-                # sí habían resuelto bien. ORDER BY antigüedad (para no
-                # dejar de intentar los más viejos primero) + abandonar
-                # después de 14 días reales sin resolver.
+                # abandonar después de 14 días reales sin resolver.
                 age_days = (time.time() - float(first_seen_sec)) / 86400 if first_seen_sec else 0
                 give_up = age_days > 14
 
@@ -244,6 +271,7 @@ class WalletCopyFeed:
                                 wallet_pnl_per_share=%s, copy_pnl_per_share_3s=%s, copy_pnl_per_share_10s=%s
                             WHERE id=%s
                         """, (winner, wallet_pnl, copy_pnl_3s, copy_pnl_10s, rid))
+                    cur.execute("DELETE FROM wallet_copy_market_checks WHERE condition_id=%s", (cid,))
                 self.shadow.conn.commit()
             except Exception as e:
                 logger.debug(f"WalletCopyFeed resolve error [{cid}]: {e}")
@@ -263,6 +291,7 @@ class WalletCopyFeed:
                     UPDATE wallet_copy_trades SET resolved_at=NOW(), actual_outcome=NULL
                     WHERE condition_id=%s AND resolved_at IS NULL
                 """, (condition_id,))
+                cur.execute("DELETE FROM wallet_copy_market_checks WHERE condition_id=%s", (condition_id,))
             self.shadow.conn.commit()
         except Exception as e:
             logger.debug(f"WalletCopyFeed abandon error [{condition_id}]: {e}")
