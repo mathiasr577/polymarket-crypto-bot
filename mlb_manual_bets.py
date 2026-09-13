@@ -1,30 +1,39 @@
 """
-Compra manual de 3 mercados de MLB — 12-sep-2026, $40 c/u.
+Compra manual de 3 mercados de MLB — 13-sep-2026, $40 c/u.
 
 Mismo criterio de siempre: precio de mercado + récord de equipo +
 abridor confirmado, eligiendo los 3 donde las tres señales apuntan en
 la misma dirección con el mayor margen.
 
-  1. Dodgers (62.5%) vs Marlins
-     Glasnow (4-0, 3.12 ERA) vs Phillips (5-6, 3.51 ERA)
-     Equipo: LAD 90-57 (mejor récord de las mayores) vs MIA 72-76
+  1. Yankees (62.5%) vs Mets
+     Schlittler (13-6, 2.01 ERA) vs Scott (4-4, 3.81 ERA)
+     Equipo: NYY 85-63 vs NYM 69-79
 
-  2. Brewers (62.5%) vs Reds
-     Harrison (10-4, 3.66 ERA) vs Singer (6-13, 5.03 ERA)
-     Equipo: MIL 92-56 (el mejor récord de toda la liga) vs CIN 69-78
+  2. Cubs (59.5%) vs Pirates
+     Boyd (6-1, 3.41 ERA) vs Chandler (10-10, 4.25 ERA)
+     Equipo: CHC 83-66 vs PIT 74-75
 
-  3. Mariners (61.5%) vs Athletics
-     Woo (11-9, 4.03 ERA) vs Jump (6-10, 5.12 ERA)
-     Equipo: SEA 69-79 vs OAK 60-88
+  3. Braves (54.5%) vs Phillies
+     Holmes (15-15, 3.74 ERA) vs Painter (3-8, 5.55 ERA)
+     Equipo: ATL 88-61 vs PHI 82-67
 
 Descartados a propósito por señal mixta (abridor favorece un lado, el
-equipo el otro — el mismo tipo de conflicto que nos hizo perder la de
-Red Sox el 11-sep):
-  - Royals @ Red Sox: Dobnak (2.54 ERA) mejor que Suarez, pero Boston
-    es mucho mejor equipo (80-68 vs 66-82).
-  - Astros @ Rays: Lambert mejor ERA que Seymour, pero Tampa Bay es
-    mucho mejor equipo (88-59 vs 75-73).
-  - Phillies @ Braves: abridor de Philadelphia todavía "Undecided".
+equipo el otro):
+  - Astros @ Rays: Wesneski (4-1, 3.18 ERA) mejor que Peralta, pero
+    Tampa Bay es mucho mejor equipo (89-59 vs 75-74).
+  - Reds @ Brewers: Chase Burns (15-3, 2.73 ERA) élite, pero Milwaukee
+    es mucho mejor equipo (93-56 vs 69-79).
+  - Padres @ Giants: Webb (8-8, 4.10 ERA) mejor que Pivetta (viene de
+    lesión, 1-2, 4.50), pero San Diego es mejor equipo (80-68 vs 62-87).
+
+Descartado por dato de abridor no confiable:
+  - Dodgers @ Marlins: stats encontrados de Sheehan inconsistentes
+    entre fuentes.
+
+Descartado a propósito aunque señales alineadas (patrón repetido):
+  - Royals @ Red Sox: Red Sox (62.5%) ya nos quemó 2 veces (9-sep,
+    11-sep) con señales igual de alineadas — se evita ese equipo en
+    particular por ahora.
 
 Uso (desde este directorio, linkeado a Railway):
     railway ssh -- python3 mlb_manual_bets.py            # dry-run
@@ -38,19 +47,19 @@ STAKE_USD = 40.0
 
 BETS = [
     {
-        "label": "Dodgers vs. Marlins (12-sep 4:10PM ET) -> DODGERS  [Glasnow 3.12 ERA vs Phillips 3.51 ERA | equipo 90-57 vs 72-76]",
-        "token_id": "89254313729353657865448740606800371484028707376712453212148059579290368635237",
+        "label": "Mets vs. Yankees (13-sep 1:35PM ET) -> YANKEES  [Schlittler 2.01 ERA vs Scott 3.81 ERA | equipo 85-63 vs 69-79]",
+        "token_id": "101960293859407347948900822039681739125651573477238121731594035343153530077189",
         "ref_price": 0.625,
     },
     {
-        "label": "Reds vs. Brewers (12-sep 7:10PM ET) -> BREWERS  [Harrison 10-4, 3.66 ERA vs Singer 6-13, 5.03 ERA | equipo 92-56 vs 69-78]",
-        "token_id": "29709678869675293155685850008106215817128012954892729405079042054890388004047",
-        "ref_price": 0.625,
+        "label": "Pirates vs. Cubs (13-sep 2:20PM ET) -> CUBS  [Boyd 6-1, 3.41 ERA vs Chandler 10-10, 4.25 ERA | equipo 83-66 vs 74-75]",
+        "token_id": "11128162176137494751143534450945065509897046852965888068827616950952422529385",
+        "ref_price": 0.595,
     },
     {
-        "label": "Mariners vs. Athletics (12-sep 9:40PM ET) -> MARINERS  [Woo 4.03 ERA vs Jump 5.12 ERA | equipo 69-79 vs 60-88]",
-        "token_id": "83926356025481135538956165876000129839932688776513163284546224490960048774048",
-        "ref_price": 0.615,
+        "label": "Phillies vs. Braves (13-sep 1:35PM ET) -> BRAVES  [Holmes 15-15, 3.74 ERA vs Painter 3-8, 5.55 ERA | equipo 88-61 vs 82-67]",
+        "token_id": "82990207402545549102824180090410788072844314823317600116896392916680876563304",
+        "ref_price": 0.545,
     },
 ]
 
