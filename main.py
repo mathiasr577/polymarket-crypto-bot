@@ -648,7 +648,10 @@ def main():
 
     start_feed()
     start_scanner()
-    start_fomo_feed()  # proyecto independiente, no depende de SHADOW_MODE_ENABLED — ver fomo_feed.py
+    # 14-sep-2026: FOMO apagado — la única tesis para la que servía (comprar
+    # en el consenso de traders top) quedó refutada con datos reales:
+    # retorno promedio -7.9% a 1h, 35% de aciertos, n=539 (ver conversación).
+    # start_fomo_feed()
     if config.SHADOW_MODE_ENABLED:
         start_chainlink_feed()
         start_order_flow_feed()
@@ -659,13 +662,25 @@ def main():
     t = threading.Thread(target=trading_loop, daemon=True)
     t.start()
 
-    if config.SHADOW_MODE_ENABLED:
-        t2 = threading.Thread(
-            target=_book_snapshot_loop,
-            args=(get_scanner(), get_chainlink_feed(), get_order_flow_feed(), get_book_feed(), get_shadow_logger(), get_kalshi_feed()),
-            daemon=True,
-        )
-        t2.start()
+    # 14-sep-2026: _book_snapshot_loop apagado — las tres cosas que
+    # alimentaba quedaron confirmadas muertas con datos reales:
+    #   - kalshi_maker_quotes (rebate 20%): EV real -0.039/share en 703
+    #     hits resueltos, peor que el backtest pre-registrado (-0.024/share).
+    #   - shadow_book_snapshots (TWAP Decay Lock-In): EV real -0.002/share,
+    #     n=7184, incluso filtrando a gaps de TWAP grandes (>=10) el
+    #     winrate se mantiene ~51% — sin edge, mercado eficiente hasta el
+    #     último segundo.
+    #   - shadow_trade_tape: solo alimentaba el análisis de maker de arriba.
+    # kalshi_feed sigue corriendo (línea de arriba) porque el LEAN de Kalshi
+    # como 4ta confirmación de señal es una pregunta distinta, todavía sin
+    # resolver — no se apaga acá.
+    # if config.SHADOW_MODE_ENABLED:
+    #     t2 = threading.Thread(
+    #         target=_book_snapshot_loop,
+    #         args=(get_scanner(), get_chainlink_feed(), get_order_flow_feed(), get_book_feed(), get_shadow_logger(), get_kalshi_feed()),
+    #         daemon=True,
+    #     )
+    #     t2.start()
 
     flask_app = create_dashboard(
         get_stats_fn=get_combined_stats,
